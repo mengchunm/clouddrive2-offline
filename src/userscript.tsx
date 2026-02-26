@@ -131,9 +131,15 @@ function createIconBtn(magnetUrl: string): HTMLButtonElement {
     try {
       await addOffline(magnetUrl, cfg.offlineDestPath);
       notification.success({ message: "已提交离线下载任务" });
-      window.dispatchEvent(new CustomEvent("cd2-task-submitted"));
+      window.dispatchEvent(new CustomEvent("cd2-task-submitted", { detail: { urls: magnetUrl } }));
     } catch (err) {
-      notification.error({ message: `提交失败: ${err || "未知错误"}` });
+      const errMsg = (err as Error)?.message || "";
+      if (errMsg.includes("任务已存在")) {
+        notification.info({ message: "任务已存在，已置顶显示" });
+        window.dispatchEvent(new CustomEvent("cd2-task-submitted", { detail: { urls: magnetUrl } }));
+      } else {
+        notification.error({ message: `提交失败: ${errMsg || "未知错误"}` });
+      }
     } finally {
       btn.disabled = false;
       btn.style.opacity = "1";
@@ -177,9 +183,15 @@ function createBatchBtn(getUrls: () => string[]): HTMLButtonElement {
     try {
       await addOffline(combined, cfg.offlineDestPath);
       notification.success({ message: `已提交 ${urls.length} 个离线下载任务` });
-      window.dispatchEvent(new CustomEvent("cd2-task-submitted"));
+      window.dispatchEvent(new CustomEvent("cd2-task-submitted", { detail: { urls: combined } }));
     } catch (err) {
-      notification.error({ message: `提交失败: ${err || "未知错误"}` });
+      const errMsg = (err as Error)?.message || "";
+      if (errMsg.includes("任务已存在")) {
+        notification.info({ message: "任务已存在，已置顶显示" });
+        window.dispatchEvent(new CustomEvent("cd2-task-submitted", { detail: { urls: combined } }));
+      } else {
+        notification.error({ message: `提交失败: ${errMsg || "未知错误"}` });
+      }
     } finally {
       btn.disabled = false;
       btn.style.opacity = "1";

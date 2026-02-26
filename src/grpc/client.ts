@@ -7,6 +7,8 @@ import {
   AddOfflineFileRequestSchema,
   type CloudAPI,
   type CloudDriveFile,
+  type CloudDrivePushMessage,
+  CloudDrivePushMessage_MessageType,
   CloudDriveFileSrv,
   type CloudDriveSystemInfo,
   type DownloadUrlPathInfo,
@@ -168,4 +170,61 @@ export async function listSubFiles(path: string): Promise<CloudDriveFile[]> {
     console.error("ListSubFiles Error:", err);
   }
   return files;
+}
+
+function getStreamingClient(): Client<typeof CloudDriveFileSrv> {
+  const cfg = getConfig();
+  const authInterceptor: Interceptor = (next) => async (req) => {
+    const token = cfg.apiToken;
+    if (token) {
+      req.header.set("Authorization", token.startsWith("Bearer ") ? token : `Bearer ${token}`);
+    }
+    return await next(req);
+  };
+
+  const transport = createGrpcWebTransport({
+    baseUrl: cfg.grpcBaseUrl,
+    interceptors: [authInterceptor],
+    // Use native fetch for streaming to avoid GM_xmlhttpRequest streaming issues
+    fetch: (input, init) => fetch(input, init),
+  });
+
+  return createClient(CloudDriveFileSrv, transport);
+}
+
+/**
+ * 订阅 PushMessage 服务端流式推送。
+ * 当收到 DOWNLOADER_COUNT 或 FILE_SYSTEM_CHANGE 事件时回调 onRefresh。
+ */
+export function subscribePushMessage(
+  onRefresh: () => void,
+  signal: AbortSignal,
+): void {
+  const client = getStreamingClient();
+
+  const connect = async () => {
+    if (signal.aborted) return;
+    try {
+      for await (const msg of client.pushMessage(create(EmptySchema, {}), { signal })) {
+        if (
+          msg.messageType === CloudDrivePushMessage_MessageType.DOWNLOADER_COUNT ||
+          msg.messageType === CloudDrivePushMessage_MessageType.FILE_SYSTEM_CHANGE
+        ) {
+          onRefresh();
+        }
+      }
+      // Stream ended normally, reconnect if not aborted
+      if (!signal.aborted) {
+        setTimeout(connect, 3000);
+      }
+    } catch (err) {
+      // AbortError is normal when canceling
+      if ((err as Error)?.name !== "AbortError" && !signal.aborted) {
+        console.warn("[cd2] PushMessage stream error:", err);
+        setTimeout(connect, 3000); // Reconnect on error
+      }
+    }
+  };
+
+  connect();
 }

@@ -28,11 +28,18 @@ export function FloatingPanel() {
         try {
             await addOffline(batchUrls, cfg.offlineDestPath);
             message.success("已提交离线下载任务");
-            window.dispatchEvent(new CustomEvent("cd2-task-submitted"));
+            window.dispatchEvent(new CustomEvent("cd2-task-submitted", { detail: { urls: batchUrls } }));
             setBatchUrls("");
         } catch (err) {
-            console.error(err);
-            message.error((err as Error)?.message || "提交失败");
+            const errMsg = (err as Error)?.message || "";
+            if (errMsg.includes("任务已存在")) {
+                message.info("任务已存在，已置顶显示");
+                window.dispatchEvent(new CustomEvent("cd2-task-submitted", { detail: { urls: batchUrls } }));
+                setBatchUrls("");
+            } else {
+                console.error(err);
+                message.error(errMsg || "提交失败");
+            }
         } finally {
             setSubmitting(false);
         }

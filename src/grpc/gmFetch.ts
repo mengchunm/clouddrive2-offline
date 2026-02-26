@@ -6,7 +6,60 @@ import { GM_xmlhttpRequest } from "vite-plugin-monkey/dist/client";
  * Notes:
  * - Requires @grant GM_xmlhttpRequest and appropriate @connect permissions in userscript metadata.
  * - Only supports the subset used by @connectrpc/connect-web (method, headers, body, arraybuffer response).
+ * - Streaming (PushMessage) uses a separate client with native fetch, see client.ts getStreamingClient().
  */
+
+/** 解析 responseHeaders 字符串为 Headers 对象 */
+function parseHeaders(raw: string | undefined): Headers {
+  const headers = new Headers();
+  if (!raw) return headers;
+  for (const line of raw.split(/\r?\n/)) {
+    const idx = line.indexOf(":");
+    if (idx > 0) {
+      const k = line.slice(0, idx).trim();
+      const v = line.slice(idx + 1).trim();
+      if (k) headers.append(k, v);
+    }
+  }
+  return headers;
+}
+
+/** 准备请求 body */
+async function prepareBody(
+  init: RequestInit,
+  input: RequestInfo | URL,
+): Promise<string | ArrayBuffer | undefined> {
+  const body =
+    init.body ?? (typeof input === "object" && input instanceof Request ? (input as Request).body : undefined);
+  if (body instanceof ReadableStream) {
+    const reader = body.getReader();
+    const chunks: Uint8Array[] = [];
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value) chunks.push(value);
+    }
+    const total = chunks.reduce((n, c) => n + c.byteLength, 0);
+    const merged = new Uint8Array(total);
+    let offset = 0;
+    for (const c of chunks) {
+      merged.set(c, offset);
+      offset += c.byteLength;
+    }
+    return merged.buffer;
+  }
+  if (body instanceof ArrayBuffer) return body;
+  if (body instanceof Uint8Array) {
+    const ab = new ArrayBuffer(body.byteLength);
+    new Uint8Array(ab).set(body);
+    return ab;
+  }
+  if (body instanceof Blob) return await body.arrayBuffer();
+  if (typeof body === "string") return body;
+  if (body == null) return undefined;
+  return String(body as unknown as object);
+}
+
 export async function gmFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
   // If GM_xmlhttpRequest is not available, fall back to native fetch
   const GMX: typeof GM_xmlhttpRequest | undefined =
@@ -42,44 +95,7 @@ export async function gmFetch(input: RequestInfo | URL, init: RequestInit = {}):
   }
 
   // Prepare body
-  let data: string | ArrayBuffer | undefined;
-  const body =
-    init.body ?? (typeof input === "object" && input instanceof Request ? (input as Request).body : undefined);
-  if (body instanceof ReadableStream) {
-    // Consume stream to ArrayBuffer
-    const reader = body.getReader();
-    const chunks: Uint8Array[] = [];
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      if (value) chunks.push(value);
-    }
-    const total = chunks.reduce((n, c) => n + c.byteLength, 0);
-    const merged = new Uint8Array(total);
-    let offset = 0;
-    for (const c of chunks) {
-      merged.set(c, offset);
-      offset += c.byteLength;
-    }
-    data = merged.buffer;
-  } else if (body instanceof ArrayBuffer) {
-    data = body;
-  } else if (body instanceof Uint8Array) {
-    // Ensure we provide a plain ArrayBuffer by copying into a fresh buffer
-    const ab = new ArrayBuffer(body.byteLength);
-    new Uint8Array(ab).set(body);
-    data = ab;
-  } else if (body instanceof Blob) {
-    data = await body.arrayBuffer();
-  } else if (typeof body === "string") {
-    data = body;
-  } else if (body == null) {
-    data = undefined;
-  } else {
-    // Attempt to handle unknown body by stringifying
-    data = String(body as unknown as object);
-  }
+  const data = await prepareBody(init, input);
 
   const response: Response = await new Promise((resolve, reject) => {
     try {

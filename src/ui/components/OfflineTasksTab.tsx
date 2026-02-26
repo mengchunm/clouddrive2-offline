@@ -3,7 +3,7 @@ import { App as AntdApp, Button, Checkbox, Flex, Space, Table, Tag, Tooltip, Typ
 import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getConfig, getDeleteFiles, setDeleteFiles } from "@/config";
-import { getOfflineQuotaInfo, listAllOfflineFiles, removeOfflineFilesBulk, findFileByPath, getDownloadUrlPath, listSubFiles } from "@/grpc/client";
+import { getOfflineQuotaInfo, listAllOfflineFiles, removeOfflineFilesBulk, findFileByPath, getDownloadUrlPath, listSubFiles, subscribePushMessage } from "@/grpc/client";
 import { OfflineFileStatus } from "@/proto/clouddrive_pb";
 
 type Row = {
@@ -27,10 +27,13 @@ export function OfflineTasksTab() {
   const [selected, setSelected] = useState<React.Key[]>([]);
   const [shouldDeleteFiles, setShouldDeleteFiles] = useState(() => getDeleteFiles());
   const reqIdRef = useRef(0);
+  /** 最近提交的 btih hash 集合，用于置顶匹配 */
+  const pinnedHashesRef = useRef<Set<string>>(new Set());
 
-  const fetchAll = useCallback(async () => {
+  // 核心拉取逻辑：showLoading 控制是否显示 loading 动画
+  const doFetchAll = useCallback(async (showLoading: boolean) => {
     const thisReqId = ++reqIdRef.current;
-    setLoading(true);
+    if (showLoading) setLoading(true);
     try {
       const [listRes, quotaRes] = await Promise.all([listAllOfflineFiles(page), getOfflineQuotaInfo()]);
       const mapped: Row[] = listRes.offlineFiles.map((f) => ({
@@ -48,34 +51,120 @@ export function OfflineTasksTab() {
         })(),
       }));
       if (thisReqId === reqIdRef.current) {
-        setRows(mapped);
+        // 置顶排序：匹配 pinnedHashes 的行排在最前面
+        const pinned = pinnedHashesRef.current;
+        if (pinned.size > 0) {
+          const top: Row[] = [];
+          const rest: Row[] = [];
+          for (const r of mapped) {
+            if (r.infoHash && pinned.has(r.infoHash.toLowerCase())) {
+              top.push(r);
+            } else {
+              rest.push(r);
+            }
+          }
+          setRows([...top, ...rest]);
+        } else {
+          setRows(mapped);
+        }
         setTotal(listRes.totalCount);
         setQuota(quotaRes);
       }
     } catch (err) {
-      message.error((err as Error)?.message || "加载失败");
+      if (showLoading) message.error((err as Error)?.message || "加载失败");
     } finally {
-      setLoading(false);
+      if (showLoading) setLoading(false);
     }
   }, [message, page]);
+
+  /** 手动刷新（带 loading 动画，清除置顶） */
+  const fetchAll = useCallback(() => {
+    pinnedHashesRef.current = new Set();
+    return doFetchAll(true);
+  }, [doFetchAll]);
+  /** 静默刷新（无 loading 动画，用于事件驱动） */
+  const fetchAllSilent = useCallback(() => doFetchAll(false), [doFetchAll]);
 
   // 初始加载
   useEffect(() => {
     fetchAll();
   }, [fetchAll]);
 
-  // 监听事件驱动刷新：任务提交 / 任务删除
+  // 监听事件驱动刷新：任务提交 / 任务删除 → 静默刷新
   useEffect(() => {
-    const onRefresh = () => {
-      setTimeout(fetchAll, 1000);
+    const BTIH_RE = /urn:btih:([a-f0-9]{40}|[a-z2-7]{32})/gi;
+    const onSubmitted = (e: Event) => {
+      const urlsStr = (e as CustomEvent)?.detail?.urls as string | undefined;
+      if (urlsStr) {
+        const hashes = new Set<string>();
+        for (const m of urlsStr.matchAll(BTIH_RE)) {
+          hashes.add(m[1].toLowerCase());
+        }
+        if (hashes.size > 0) pinnedHashesRef.current = hashes;
+      }
+      fetchAllSilent();
     };
-    window.addEventListener("cd2-task-submitted", onRefresh);
-    window.addEventListener("cd2-task-deleted", onRefresh);
+    const onDeleted = () => fetchAllSilent();
+    window.addEventListener("cd2-task-submitted", onSubmitted);
+    window.addEventListener("cd2-task-deleted", onDeleted);
     return () => {
-      window.removeEventListener("cd2-task-submitted", onRefresh);
-      window.removeEventListener("cd2-task-deleted", onRefresh);
+      window.removeEventListener("cd2-task-submitted", onSubmitted);
+      window.removeEventListener("cd2-task-deleted", onDeleted);
     };
-  }, [fetchAll]);
+  }, [fetchAllSilent]);
+
+  // 是否有活跃（未完成）的离线任务
+  const hasActiveTask = useMemo(
+    () => rows.some((r) => r.status === OfflineFileStatus.OFFLINE_INIT || r.status === OfflineFileStatus.OFFLINE_DOWNLOADING),
+    [rows],
+  );
+
+  // 自适应轮询：存在活跃任务 + 页面可见时自动静默刷新
+  useEffect(() => {
+    if (!hasActiveTask) return;
+
+    const POLL_MIN = 2_000;
+    const POLL_MAX = 15_000;
+    const POLL_STEP = 1_000;
+    let delay = POLL_MIN;
+    let timerId: ReturnType<typeof setTimeout> | null = null;
+    let stopped = false;
+
+    const schedule = () => {
+      if (stopped) return;
+      if (document.hidden) return; // 页面不可见时暂停
+      timerId = setTimeout(async () => {
+        if (stopped) return;
+        await fetchAllSilent();
+        delay = Math.min(delay + POLL_STEP, POLL_MAX);
+        schedule();
+      }, delay);
+    };
+
+    // 页面重新可见时恢复轮询
+    const onVisChange = () => {
+      if (!document.hidden && !stopped) {
+        delay = POLL_MIN; // 重新可见时重置间隔
+        if (!timerId) schedule();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisChange);
+
+    schedule();
+
+    return () => {
+      stopped = true;
+      if (timerId) clearTimeout(timerId);
+      document.removeEventListener("visibilitychange", onVisChange);
+    };
+  }, [hasActiveTask, fetchAllSilent]);
+
+  // PushMessage 事件驱动（可选增强）：如果原生 fetch 能连通 CD2 服务端，会额外提供实时推送
+  useEffect(() => {
+    const ac = new AbortController();
+    subscribePushMessage(() => fetchAllSilent(), ac.signal);
+    return () => ac.abort();
+  }, [fetchAllSilent]);
 
   // 同步记忆"删除文件"选项
   const toggleDeleteFiles = useCallback((checked: boolean) => {
@@ -207,7 +296,7 @@ export function OfflineTasksTab() {
     return file;
   }, []);
 
-  /** 播放：preview=true，走流媒体模式 */
+  /** 播放：优先使用 artplayer 脚本（如已安装），否则新标签页打开 */
   const playFile = useCallback(async (row: Row) => {
     const hide = message.loading("正在获取播放地址...", 0);
     try {
@@ -218,14 +307,38 @@ export function OfflineTasksTab() {
       }
       const cfg = getConfig();
       const urlInfo = await getDownloadUrlPath(file.fullPathName, true);
+
+      let videoUrl = "";
       if (urlInfo.downloadUrlPath) {
         const baseUrl = cfg.grpcBaseUrl.replace(/\/$/, "");
         const p = urlInfo.downloadUrlPath.startsWith("/") ? urlInfo.downloadUrlPath : `/${urlInfo.downloadUrlPath}`;
-        window.open(`${baseUrl}${p}`, "_blank");
+        videoUrl = `${baseUrl}${p}`;
       } else if (urlInfo.directUrl) {
-        window.open(urlInfo.directUrl, "_blank");
-      } else {
+        videoUrl = urlInfo.directUrl;
+      }
+
+      if (!videoUrl) {
         message.error("获取播放地址失败");
+        return;
+      }
+
+      // 使用 unsafeWindow 跨沙箱通信
+      const realWindow = (typeof unsafeWindow !== "undefined" ? unsafeWindow : window) as any;
+
+      if (realWindow.__cd2ArtplayerReady) {
+        // artplayer 脚本已加载，通过事件播放
+        realWindow.dispatchEvent(new CustomEvent("cd2-play-video", {
+          detail: {
+            fileName: file.name,
+            filePath: file.fullPathName,
+            videoUrl,
+            grpcBaseUrl: cfg.grpcBaseUrl,
+            apiToken: cfg.apiToken,
+          },
+        }));
+      } else {
+        // artplayer 未安装，回退到新标签页打开
+        window.open(videoUrl, "_blank");
       }
     } catch (e) {
       message.error(`播放失败：${(e as Error).message}`);
