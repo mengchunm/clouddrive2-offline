@@ -1,62 +1,45 @@
-name: Build and Release
+name: Release
 
 on:
   push:
-    tags:
-      - v*
+    branches:
+      - main
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Tag"
-        required: true
-
-env:
-  NODE_VERSION: "24"
-  PNPM_VERSION: "10"
 
 jobs:
-  release:
+  build-and-release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Setup pnpm
+      - uses: actions/checkout@v4
+      
+      - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: ${{ env.PNPM_VERSION }}
-
-      - name: Get pnpm store directory
-        shell: bash
-        run: |
-          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
-
-      - name: Setup pnpm cache
-        uses: actions/cache@v4
+          version: 10
+          run_install: false
+          
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
         with:
-          path: ${{ env.STORE_PATH }}
-          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-pnpm-store-
+          node-version: 22
+          cache: 'pnpm'
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile=false
 
       - name: Build
-        run: pnpm build
+        run: pnpm run build
 
-      - name: Create Release
-        uses: svenstaro/upload-release-action@v2
+      - name: Create or Update Release
+        uses: softprops/action-gh-release@v2
         with:
-          file_glob: true
-          overwrite: true
-          file: dist/*.user.js
-          prerelease: false
-          tag: ${{ github.event.inputs.tag || github.ref_name }}
+          tag_name: latest
+          name: Latest Build
+          make_latest: true
+          files: |
+            packages/offline/dist/clouddrive2-offline.user.js
+            packages/artplayer/dist/clouddrive2-artplayer.user.js
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
