@@ -1,0 +1,28 @@
+{
+    "name": "clouddrive2-artplayer",
+    "version": "1.0.0",
+    "description": "基于 ArtPlayer 的 CloudDrive2 视频播放器，集成弹弹Play弹幕",
+    "private": true,
+    "author": {
+        "name": "saevio",
+        "url": "https://github.com/mengchunm/clouddrive2-artplayer"
+    },
+    "type": "module",
+    "license": "MIT",
+    "scripts": {
+        "dev": "vite",
+        "build": "vite build",
+        "preview": "vite preview"
+    },
+    "dependencies": {
+        "artplayer": "^5.3.0",
+        "artplayer-plugin-danmuku": "^5.2.0"
+    },
+    "devDependencies": {
+        "@types/node": "^24.10.1",
+        "@types/tampermonkey": "^5.0.5",
+        "typescript": "^5.9.3",
+        "vite": "^7.3.1",
+        "vite-plugin-monkey": "^7.1.6"
+    }
+}
