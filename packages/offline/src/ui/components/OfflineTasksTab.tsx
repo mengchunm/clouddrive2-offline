@@ -17,6 +17,120 @@ type Row = {
   addTime?: number;
 };
 
+const PAGE_SIZE = 30;
+const BTIH_RE_SOURCE = "urn:btih:([a-f0-9]{40}|[a-z2-7]{32})";
+const BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+const HEX_RE = /^[a-f0-9]{40}$/i;
+const BASE32_RE = /^[a-z2-7]{32}$/i;
+
+function base32ToHex(base32: string): string | undefined {
+  const clean = base32.replace(/=+$/g, "").toUpperCase();
+  let bits = 0;
+  let value = 0;
+  const bytes: number[] = [];
+  for (const ch of clean) {
+    const idx = BASE32_ALPHABET.indexOf(ch);
+    if (idx === -1) return undefined;
+    value = (value << 5) | idx;
+    bits += 5;
+    if (bits >= 8) {
+      bits -= 8;
+      bytes.push((value >> bits) & 0xff);
+    }
+  }
+  if (bytes.length === 0) return undefined;
+  return bytes.map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function canonicalizeHash(hash: string): string {
+  const h = hash.toLowerCase();
+  if (HEX_RE.test(h)) return h;
+  if (BASE32_RE.test(h)) return base32ToHex(h) ?? h;
+  return h;
+}
+
+function collectBtihMatches(text: string): string[] {
+  const re = new RegExp(BTIH_RE_SOURCE, "gi");
+  return Array.from(text.matchAll(re), (m) => m[1]);
+}
+
+function extractHashFromText(text?: string): string | undefined {
+  if (!text) return undefined;
+  const direct = collectBtihMatches(text);
+  if (direct[0]) return direct[0];
+  try {
+    const decoded = decodeURIComponent(text);
+    if (decoded !== text) {
+      const decodedMatches = collectBtihMatches(decoded);
+      if (decodedMatches[0]) return decodedMatches[0];
+    }
+  } catch {
+    // ignore decode errors
+  }
+  return undefined;
+}
+
+function extractPinnedHashes(urlsStr: string): Set<string> {
+  const hashes = new Set<string>();
+  const addFrom = (text: string) => {
+    for (const h of collectBtihMatches(text)) {
+      hashes.add(canonicalizeHash(h));
+    }
+  };
+  addFrom(urlsStr);
+  try {
+    const decoded = decodeURIComponent(urlsStr);
+    if (decoded !== urlsStr) addFrom(decoded);
+  } catch {
+    // ignore decode errors
+  }
+  return hashes;
+}
+
+function getRowHash(row: Row): string | undefined {
+  const raw = row.infoHash ?? extractHashFromText(row.url);
+  if (!raw) return undefined;
+  return canonicalizeHash(raw);
+}
+
+async function findPinnedRows(pinnedHashes: Set<string>, totalPages: number, currentPage: number): Promise<Row[]> {
+  if (pinnedHashes.size === 0) return [];
+  if (!totalPages || totalPages <= 1) return [];
+
+  const found: Row[] = [];
+  const foundHashes = new Set<string>();
+
+  for (let p = 1; p <= totalPages; p++) {
+    if (p === currentPage) continue;
+    const listRes = await listAllOfflineFiles(p);
+    for (const f of listRes.offlineFiles) {
+      const rawHash = f.infoHash ?? extractHashFromText(f.url);
+      if (!rawHash) continue;
+      const hash = canonicalizeHash(rawHash);
+      if (!pinnedHashes.has(hash) || foundHashes.has(hash)) continue;
+      foundHashes.add(hash);
+      found.push({
+        key: f.infoHash || f.url,
+        name: f.name,
+        sizeMB: Number(f.size || 0) / (1024 * 1024),
+        url: f.url,
+        status: f.status,
+        percendDonePct: f.percendDone,
+        infoHash: f.infoHash,
+        addTime: (() => {
+          const v = Number(f.addTime || 0);
+          if (!v) return undefined;
+          return v > 1e12 ? v : v * 1000;
+        })(),
+      });
+      if (foundHashes.size >= pinnedHashes.size) break;
+    }
+    if (foundHashes.size >= pinnedHashes.size) break;
+  }
+
+  return found;
+}
+
 export function OfflineTasksTab() {
   const { message, modal } = AntdApp.useApp();
   const [loading, setLoading] = useState(false);
@@ -50,23 +164,53 @@ export function OfflineTasksTab() {
           return v > 1e12 ? v : v * 1000;
         })(),
       }));
-      if (thisReqId === reqIdRef.current) {
-        // 置顶排序：匹配 pinnedHashes 的行排在最前面
-        const pinned = pinnedHashesRef.current;
-        if (pinned.size > 0) {
-          const top: Row[] = [];
-          const rest: Row[] = [];
-          for (const r of mapped) {
-            if (r.infoHash && pinned.has(r.infoHash.toLowerCase())) {
-              top.push(r);
-            } else {
-              rest.push(r);
-            }
+      let finalRows = mapped;
+
+      // 置顶排序：匹配 pinnedHashes 的行排在最前面（必要时跨页补齐）
+      const pinned = pinnedHashesRef.current;
+      if (pinned.size > 0) {
+        const top: Row[] = [];
+        const rest: Row[] = [];
+        const matchedHashes = new Set<string>();
+
+        for (const r of mapped) {
+          const hash = getRowHash(r);
+          if (hash && pinned.has(hash)) {
+            matchedHashes.add(hash);
+            top.push(r);
+          } else {
+            rest.push(r);
           }
-          setRows([...top, ...rest]);
-        } else {
-          setRows(mapped);
         }
+
+        let extraPinned: Row[] = [];
+        if (matchedHashes.size < pinned.size) {
+          const missingHashes = new Set<string>();
+          for (const h of pinned) {
+            if (!matchedHashes.has(h)) missingHashes.add(h);
+          }
+          extraPinned = await findPinnedRows(missingHashes, listRes.pageCount, page);
+        }
+
+        if (thisReqId !== reqIdRef.current) return;
+
+        const merged: Row[] = [];
+        const seenHashes = new Set<string>();
+        const pushDedup = (r: Row) => {
+          const hash = getRowHash(r);
+          if (hash && seenHashes.has(hash)) return;
+          if (hash) seenHashes.add(hash);
+          merged.push(r);
+        };
+
+        for (const r of top) pushDedup(r);
+        for (const r of extraPinned) pushDedup(r);
+        for (const r of rest) pushDedup(r);
+        finalRows = merged.slice(0, PAGE_SIZE);
+      }
+
+      if (thisReqId === reqIdRef.current) {
+        setRows(finalRows);
         setTotal(listRes.totalCount);
         setQuota(quotaRes);
       }
@@ -92,14 +236,10 @@ export function OfflineTasksTab() {
 
   // 监听事件驱动刷新：任务提交 / 任务删除 → 静默刷新
   useEffect(() => {
-    const BTIH_RE = /urn:btih:([a-f0-9]{40}|[a-z2-7]{32})/gi;
     const onSubmitted = (e: Event) => {
       const urlsStr = (e as CustomEvent)?.detail?.urls as string | undefined;
       if (urlsStr) {
-        const hashes = new Set<string>();
-        for (const m of urlsStr.matchAll(BTIH_RE)) {
-          hashes.add(m[1].toLowerCase());
-        }
+        const hashes = extractPinnedHashes(urlsStr);
         if (hashes.size > 0) pinnedHashesRef.current = hashes;
       }
       fetchAllSilent();
@@ -323,7 +463,7 @@ export function OfflineTasksTab() {
       }
 
       // 使用 unsafeWindow 跨沙箱通信
-      const realWindow = (typeof unsafeWindow !== "undefined" ? unsafeWindow : window) as any;
+      const realWindow = (typeof unsafeWindow !== "undefined" ? unsafeWindow : window) as Window & { __cd2ArtplayerReady?: boolean };
 
       if (realWindow.__cd2ArtplayerReady) {
         // artplayer 脚本已加载，通过事件播放
@@ -474,7 +614,7 @@ export function OfflineTasksTab() {
         pagination={{
           current: page,
           total,
-          pageSize: 30,
+          pageSize: PAGE_SIZE,
           size: "small",
           showSizeChanger: false,
           onChange: (p) => setPage(p),

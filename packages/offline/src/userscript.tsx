@@ -11,9 +11,45 @@ import "@ant-design/v5-patch-for-react-19";
 import { notification } from "antd";
 import { createRoot } from "react-dom/client";
 import { getConfig } from "@/config";
-import { addOffline } from "@/grpc/client";
+import { submitOffline } from "@/grpc/client";
 import { CD2_ICON_BASE64 } from "@/icon";
 import { App } from "./ui/App";
+
+// ─── 兼容处理 (Trusted Types) ──────────────────────────
+// 解决在 Google Gemini / AI Studio 等开启了核心严苛 CSP 的网站上，
+// React/Antd 插入包含内联样式的 DOM 时触发 TrustedHTML 报错的问题。
+const w = window as any;
+if (typeof w.trustedTypes !== "undefined" && w.trustedTypes.createPolicy) {
+  try {
+    const cd2Policy = w.trustedTypes.createPolicy("cd2-offline-policy", {
+      createHTML: (s: string) => s,
+      createScript: (s: string) => s,
+      createScriptURL: (s: string) => s,
+    });
+    const origInnerHTML = Object.getOwnPropertyDescriptor(Element.prototype, "innerHTML");
+    const origSet = origInnerHTML?.set;
+    if (origInnerHTML && origSet) {
+      Object.defineProperty(Element.prototype, "innerHTML", {
+        set(value) {
+          if (typeof value === "string") {
+            try {
+              origSet.call(this, cd2Policy.createHTML(value));
+            } catch {
+              origSet.call(this, value);
+            }
+          } else {
+            origSet.call(this, value);
+          }
+        },
+        get: origInnerHTML.get,
+        enumerable: true,
+        configurable: true,
+      });
+    }
+  } catch (_e) {
+    console.warn("[cd2-offline] 无法创建或应用 TrustedTypes policy, 可能受 CSP 限制", _e);
+  }
+}
 
 // ─── 工具函数 ──────────────────────────────────────────
 
@@ -99,10 +135,6 @@ function collectMagnetCheckboxes(): { checkbox: HTMLInputElement; magnetUrl: str
   return results;
 }
 
-/** 检测页面上是否存在任何形式的磁力链接 */
-function hasMagnetOnPage(): boolean {
-  return collectSingleMagnetElements().length > 0 || collectMagnetCheckboxes().length > 0;
-}
 
 // ─── 按钮创建 ──────────────────────────────────────────
 
@@ -129,16 +161,15 @@ function createIconBtn(magnetUrl: string): HTMLButtonElement {
     btn.disabled = true;
     btn.style.opacity = "0.5";
     try {
-      await addOffline(magnetUrl, cfg.offlineDestPath);
-      notification.success({ message: "已提交离线下载任务" });
-      window.dispatchEvent(new CustomEvent("cd2-task-submitted", { detail: { urls: magnetUrl } }));
-    } catch (err) {
-      const errMsg = (err as Error)?.message || "";
-      if (errMsg.includes("任务已存在")) {
+      const res = await submitOffline(magnetUrl, cfg.offlineDestPath);
+      if (res.ok) {
+        notification.success({ message: "已提交离线下载任务" });
+        window.dispatchEvent(new CustomEvent("cd2-task-submitted", { detail: { urls: magnetUrl } }));
+      } else if (res.alreadyExists) {
         notification.info({ message: "任务已存在，已置顶显示" });
         window.dispatchEvent(new CustomEvent("cd2-task-submitted", { detail: { urls: magnetUrl } }));
       } else {
-        notification.error({ message: `提交失败: ${errMsg || "未知错误"}` });
+        notification.error({ message: `提交失败: ${res.errorMessage || "未知错误"}` });
       }
     } finally {
       btn.disabled = false;
@@ -181,16 +212,15 @@ function createBatchBtn(getUrls: () => string[]): HTMLButtonElement {
     btn.style.opacity = "0.5";
     label.textContent = ` 提交中(${urls.length})…`;
     try {
-      await addOffline(combined, cfg.offlineDestPath);
-      notification.success({ message: `已提交 ${urls.length} 个离线下载任务` });
-      window.dispatchEvent(new CustomEvent("cd2-task-submitted", { detail: { urls: combined } }));
-    } catch (err) {
-      const errMsg = (err as Error)?.message || "";
-      if (errMsg.includes("任务已存在")) {
+      const res = await submitOffline(combined, cfg.offlineDestPath);
+      if (res.ok) {
+        notification.success({ message: `已提交 ${urls.length} 个离线下载任务` });
+        window.dispatchEvent(new CustomEvent("cd2-task-submitted", { detail: { urls: combined } }));
+      } else if (res.alreadyExists) {
         notification.info({ message: "任务已存在，已置顶显示" });
         window.dispatchEvent(new CustomEvent("cd2-task-submitted", { detail: { urls: combined } }));
       } else {
-        notification.error({ message: `提交失败: ${errMsg || "未知错误"}` });
+        notification.error({ message: `提交失败: ${res.errorMessage || "未知错误"}` });
       }
     } finally {
       btn.disabled = false;
@@ -207,8 +237,9 @@ const CD2_MARK = "cd2Injected";
 const CD2_BATCH_MARK = "cd2BatchInjected";
 
 /** 为单个磁力元素注入图标按钮 */
-function injectSingleButtons() {
-  collectSingleMagnetElements().forEach(({ el, magnetUrl }) => {
+function injectSingleButtons(items?: { el: HTMLElement; magnetUrl: string }[]) {
+  const list = items ?? collectSingleMagnetElements();
+  list.forEach(({ el, magnetUrl }) => {
     if (el.dataset[CD2_MARK] === "1") return;
     el.dataset[CD2_MARK] = "1";
     el.insertAdjacentElement("afterend", createIconBtn(magnetUrl));
@@ -223,8 +254,8 @@ function injectSingleButtons() {
  * 3. 在每个容器的首个 checkbox 前或容器顶部注入批量按钮
  * 4. 批量按钮的 disabled 状态跟随 checkbox 选中数量
  */
-function injectBatchButtons() {
-  const checkboxes = collectMagnetCheckboxes();
+function injectBatchButtons(items?: { checkbox: HTMLInputElement; magnetUrl: string }[]) {
+  const checkboxes = items ?? collectMagnetCheckboxes();
   if (checkboxes.length === 0) return;
 
   // 按容器分组
@@ -306,13 +337,26 @@ function findMeaningfulParent(el: HTMLElement): HTMLElement | null {
   renderApp(false);
 
   const processPage = () => {
-    const pageHasMagnet = hasMagnetOnPage();
+    const single = collectSingleMagnetElements();
+    const checks = collectMagnetCheckboxes();
+    const pageHasMagnet = single.length > 0 || checks.length > 0;
     renderApp(pageHasMagnet);
-    injectSingleButtons();
-    injectBatchButtons();
+    injectSingleButtons(single);
+    injectBatchButtons(checks);
+  };
+
+  let debounceTimer: number | null = null;
+  const processPageDebounced = () => {
+    if (debounceTimer) {
+      window.clearTimeout(debounceTimer);
+    }
+    debounceTimer = window.setTimeout(() => {
+      debounceTimer = null;
+      processPage();
+    }, 150);
   };
 
   processPage();
-  const mo = new MutationObserver(() => processPage());
+  const mo = new MutationObserver(() => processPageDebounced());
   mo.observe(document.documentElement, { childList: true, subtree: true });
 })();

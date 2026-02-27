@@ -1,7 +1,7 @@
 import { App as AntdApp, Button, Divider, Form, Input, Modal, Space, Switch, Typography } from "antd";
 import { useState } from "react";
 import { getConfig, setConfig } from "@/config";
-import { addOffline } from "@/grpc/client";
+import { submitOffline } from "@/grpc/client";
 
 export interface SettingsModalProps {
     open: boolean;
@@ -26,8 +26,13 @@ export function SettingsModal({ open, onClose, panelVisible, onTogglePanel }: Se
         try {
             const v = form.getFieldsValue();
             setConfig(v);
-            await addOffline(testingUrl, v.offlineDestPath);
-            message.success("已提交离线下载任务");
+            const res = await submitOffline(testingUrl, v.offlineDestPath);
+            if (res.ok) {
+                message.success("已提交离线下载任务");
+            } else {
+                console.error(res.error ?? res.errorMessage);
+                message.error(res.errorMessage || "提交失败");
+            }
         } catch (err) {
             console.error(err);
             message.error((err as Error)?.message || "提交失败");

@@ -478,9 +478,9 @@ async function autoMatch(
 // ─── 从文件名提取搜索关键词 ────────────────────────────
 
 function extractKeyword(fileName: string): string {
-    let name = fileName
+    const name = fileName
         .replace(/\.[^.]+$/, "")
-        .replace(/[\[\]【】()（）{}「」『』]/g, " ")
+        .replace(/[[\]【】()（）{}「」『』]/g, " ")
         .replace(/\d{3,4}[xX×]\d{3,4}/g, "")
         .replace(/\b(1080[pi]?|720[pi]?|480[pi]?|2160[pi]?|4K|UHD)\b/gi, "")
         .replace(/\b(BluRay|BDRip|WEBRip|WEB-DL|DVDRip|HDTV|REMUX)\b/gi, "")
@@ -536,9 +536,9 @@ function extractEpisodeNumber(fileName: string): number | null {
         /第(\d+)[话話集期]/,           // 第01话
         /\bEP?\s*(\d+)\b/i,           // EP01 / E01
         /\bS\d+E(\d+)\b/i,            // S01E01
-        /[\s_.-]\s*(\d{2,3})\s*[\s_.\-\[【(v]/,  // 空格/分隔符后的2-3位数字
+        /[\s_.-]\s*(\d{2,3})\s*[\s_.\-[【(v]/,  // 空格/分隔符后的2-3位数字
         /[\s_.-]\s*(\d{2,3})\s*$/,    // 结尾的2-3位数字
-        /[\[\s](\d{2})\s*[\]]/,       // [01] 格式
+        /[[\s](\d{2})\s*[\]]/,       // [01] 格式
     ];
 
     for (const pat of patterns) {

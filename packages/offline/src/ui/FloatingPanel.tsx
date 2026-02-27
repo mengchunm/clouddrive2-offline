@@ -1,7 +1,7 @@
 import { App as AntdApp, Button, Card, Input, Space, Tabs, Typography } from "antd";
 import { useEffect, useMemo, useState } from "react";
 import { getConfig } from "@/config";
-import { addOffline } from "@/grpc/client";
+import { submitOffline } from "@/grpc/client";
 import { CD2_ICON_BASE64 } from "@/icon";
 import { OfflineTasksTab } from "./components/OfflineTasksTab";
 
@@ -26,19 +26,18 @@ export function FloatingPanel() {
         const cfg = getConfig();
         setSubmitting(true);
         try {
-            await addOffline(batchUrls, cfg.offlineDestPath);
-            message.success("已提交离线下载任务");
-            window.dispatchEvent(new CustomEvent("cd2-task-submitted", { detail: { urls: batchUrls } }));
-            setBatchUrls("");
-        } catch (err) {
-            const errMsg = (err as Error)?.message || "";
-            if (errMsg.includes("任务已存在")) {
+            const res = await submitOffline(batchUrls, cfg.offlineDestPath);
+            if (res.ok) {
+                message.success("已提交离线下载任务");
+                window.dispatchEvent(new CustomEvent("cd2-task-submitted", { detail: { urls: batchUrls } }));
+                setBatchUrls("");
+            } else if (res.alreadyExists) {
                 message.info("任务已存在，已置顶显示");
                 window.dispatchEvent(new CustomEvent("cd2-task-submitted", { detail: { urls: batchUrls } }));
                 setBatchUrls("");
             } else {
-                console.error(err);
-                message.error(errMsg || "提交失败");
+                console.error(res.error ?? res.errorMessage);
+                message.error(res.errorMessage || "提交失败");
             }
         } finally {
             setSubmitting(false);

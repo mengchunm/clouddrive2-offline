@@ -7,10 +7,8 @@ import {
   AddOfflineFileRequestSchema,
   type CloudAPI,
   type CloudDriveFile,
-  type CloudDrivePushMessage,
   CloudDrivePushMessage_MessageType,
   CloudDriveFileSrv,
-  type CloudDriveSystemInfo,
   type DownloadUrlPathInfo,
   type FileOperationResult,
   FindFileByPathRequestSchema,
@@ -62,11 +60,27 @@ export async function addOffline(urls: string, destPath: string): Promise<FileOp
   return res;
 }
 
-export async function getSystemInfo(): Promise<CloudDriveSystemInfo> {
-  const client = getCloudDriveClient();
-  const res = await client.getSystemInfo(create(EmptySchema, {}));
-  return res;
+export type SubmitOfflineResult = {
+  ok: boolean;
+  alreadyExists?: boolean;
+  errorMessage?: string;
+  error?: unknown;
+};
+
+export async function submitOffline(urls: string, destPath: string): Promise<SubmitOfflineResult> {
+  try {
+    await addOffline(urls, destPath);
+    return { ok: true };
+  } catch (err) {
+    const errMsg = (err as Error)?.message || "";
+    if (errMsg.includes("任务已存在")) {
+      return { ok: false, alreadyExists: true, errorMessage: errMsg, error: err };
+    }
+    return { ok: false, errorMessage: errMsg, error: err };
+  }
 }
+
+
 
 /**
  * Resolve CloudAPI info for a folder.

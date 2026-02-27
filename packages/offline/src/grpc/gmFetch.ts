@@ -111,19 +111,7 @@ export async function gmFetch(input: RequestInfo | URL, init: RequestInit = {}):
         onload: (ev) => {
           const status = ev.status ?? 0;
           const statusText = ev.statusText ?? "";
-          const headers = new Headers();
-          // Parse raw headers string
-          if (ev.responseHeaders) {
-            const lines = ev.responseHeaders.split(/\r?\n/);
-            for (const line of lines) {
-              const idx = line.indexOf(":");
-              if (idx > 0) {
-                const k = line.slice(0, idx).trim();
-                const v = line.slice(idx + 1).trim();
-                if (k) headers.append(k, v);
-              }
-            }
-          }
+          const headers = parseHeaders(ev.responseHeaders);
           const ab = (ev.response as ArrayBuffer) ?? new ArrayBuffer(0);
           const res = new Response(ab, { status, statusText, headers });
           resolve(res);
