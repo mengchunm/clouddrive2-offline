@@ -237,7 +237,10 @@ export function OfflineTasksTab() {
           finalRows = merged.slice(0, PAGE_SIZE);
         }
 
-        const tasksToCheck = finalRows.filter((r) => r.status === OfflineFileStatus.OFFLINE_FINISHED && (showLoading || (getRowHash(r) && pinned.has(getRowHash(r)!))));
+        const tasksToCheck = finalRows.filter((r) => {
+          const hash = getRowHash(r);
+          return r.status === OfflineFileStatus.OFFLINE_FINISHED && (showLoading || !!(hash && pinned.has(hash)));
+        });
         if (tasksToCheck.length > 0) {
           const missing = new Set<string>();
           const present = new Set<string>();
@@ -247,8 +250,9 @@ export function OfflineTasksTab() {
             tasksToCheck.map(async (r) => {
               try {
                 const f = await findFileByPath(parentPath, r.name);
-                if (!f) missing.add(r.key); // file is missing
-                else present.add(r.key);    // file is present
+                if (!f)
+                  missing.add(r.key); // file is missing
+                else present.add(r.key); // file is present
               } catch {
                 missing.add(r.key);
               }
@@ -257,8 +261,8 @@ export function OfflineTasksTab() {
           if (thisReqId !== reqIdRef.current) return;
           setMissingTasks((prev) => {
             const next = new Set(prev);
-            missing.forEach((k) => next.add(k));
-            present.forEach((k) => next.delete(k));
+            for (const k of missing) next.add(k);
+            for (const k of present) next.delete(k);
             return next;
           });
         }
@@ -460,7 +464,7 @@ export function OfflineTasksTab() {
         }
       } catch (err) {
         hideMsg();
-        message.error("重试失败：" + (err as Error).message);
+        message.error(`重试失败：${(err as Error).message}`);
       }
     },
     [message],
@@ -801,8 +805,8 @@ export function OfflineTasksTab() {
           const isMissing = missingTasks.has(r.key);
           return (
             <Space size={2}>
-              {r.status === OfflineFileStatus.OFFLINE_FINISHED && (
-                isMissing ? (
+              {r.status === OfflineFileStatus.OFFLINE_FINISHED &&
+                (isMissing ? (
                   <Tooltip title="重新下载此任务">
                     <Button size="small" type="text" icon={<ReloadOutlined />} onClick={() => reDownload(r)} />
                   </Tooltip>
@@ -859,8 +863,7 @@ export function OfflineTasksTab() {
                       <Button size="small" type="text" icon={<DownloadOutlined />} onClick={() => downloadFile(r)} />
                     </Tooltip>
                   </>
-                )
-              )}
+                ))}
               <Tooltip title="复制链接">
                 <Button size="small" type="text" icon={<CopyOutlined />} onClick={() => copyUrl(r.url)} />
               </Tooltip>
@@ -872,7 +875,18 @@ export function OfflineTasksTab() {
         },
       },
     ],
-    [copyUrl, formatBytes, removeOne, statusText, locateFile, playFile, downloadFile, defaultPlayer, missingTasks, reDownload],
+    [
+      copyUrl,
+      formatBytes,
+      removeOne,
+      statusText,
+      locateFile,
+      playFile,
+      downloadFile,
+      defaultPlayer,
+      missingTasks,
+      reDownload,
+    ],
   );
 
   const rowSelection = {
