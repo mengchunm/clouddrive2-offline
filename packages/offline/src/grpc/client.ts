@@ -80,8 +80,6 @@ export async function submitOffline(urls: string, destPath: string): Promise<Sub
   }
 }
 
-
-
 /**
  * Resolve CloudAPI info for a folder.
  */
@@ -210,10 +208,7 @@ function getStreamingClient(): Client<typeof CloudDriveFileSrv> {
  * 订阅 PushMessage 服务端流式推送。
  * 当收到 DOWNLOADER_COUNT 或 FILE_SYSTEM_CHANGE 事件时回调 onRefresh。
  */
-export function subscribePushMessage(
-  onRefresh: () => void,
-  signal: AbortSignal,
-): void {
+export function subscribePushMessage(onRefresh: () => void, signal: AbortSignal): void {
   const client = getStreamingClient();
 
   const connect = async () => {

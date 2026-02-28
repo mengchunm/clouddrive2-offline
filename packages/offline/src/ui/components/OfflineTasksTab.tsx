@@ -1,10 +1,39 @@
-import { CopyOutlined, DeleteOutlined, DownloadOutlined, ReloadOutlined, FolderOpenOutlined, PlayCircleOutlined } from "@ant-design/icons";
-import { App as AntdApp, Button, Checkbox, Flex, Space, Table, Tag, Tooltip, Typography } from "antd";
+import {
+  CopyOutlined,
+  DeleteOutlined,
+  DownloadOutlined,
+  ReloadOutlined,
+  FolderOpenOutlined,
+  PlayCircleOutlined,
+} from "@ant-design/icons";
+import { App as AntdApp, Button, Checkbox, Dropdown, Flex, Space, Table, Tag, Tooltip, Typography, Select } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getConfig, getDeleteFiles, setDeleteFiles } from "@/config";
-import { getOfflineQuotaInfo, listAllOfflineFiles, removeOfflineFilesBulk, findFileByPath, getDownloadUrlPath, listSubFiles, subscribePushMessage } from "@/grpc/client";
+import {
+  getOfflineQuotaInfo,
+  listAllOfflineFiles,
+  removeOfflineFilesBulk,
+  findFileByPath,
+  getDownloadUrlPath,
+  listSubFiles,
+  subscribePushMessage,
+} from "@/grpc/client";
 import { OfflineFileStatus } from "@/proto/clouddrive_pb";
+
+import potplayerImg from "../../../../../icon/potplayer.png";
+import infuseImg from "../../../../../icon/infuse.png";
+import dandanplayImg from "../../../../../icon/弹弹play.png";
+
+const PLAYER_CONFIG = {
+  web: { label: "网页播放", iconUrl: null, fallbackText: "🌐" },
+  potplayer: { label: "PotPlayer", iconUrl: potplayerImg, fallbackText: "🎬" },
+  dandanplay: { label: "弹弹Play", iconUrl: dandanplayImg, fallbackText: "📺" },
+  infuse: { label: "Infuse", iconUrl: infuseImg, fallbackText: "🔥" },
+  vlc: { label: "VLC", iconUrl: null, fallbackText: "🗼" },
+  iina: { label: "IINA", iconUrl: null, fallbackText: "🎦" },
+} as const;
+
 
 type Row = {
   key: string;
@@ -140,86 +169,92 @@ export function OfflineTasksTab() {
   const [quota, setQuota] = useState<{ total: number; used: number; left: number } | null>(null);
   const [selected, setSelected] = useState<React.Key[]>([]);
   const [shouldDeleteFiles, setShouldDeleteFiles] = useState(() => getDeleteFiles());
+  const [defaultPlayer, setDefaultPlayer] = useState<"web" | "potplayer" | "vlc" | "iina" | "infuse" | "dandanplay">(
+    () => (localStorage.getItem("cd2_default_player") as any) || "web",
+  );
   const reqIdRef = useRef(0);
   /** 最近提交的 btih hash 集合，用于置顶匹配 */
   const pinnedHashesRef = useRef<Set<string>>(new Set());
 
   // 核心拉取逻辑：showLoading 控制是否显示 loading 动画
-  const doFetchAll = useCallback(async (showLoading: boolean) => {
-    const thisReqId = ++reqIdRef.current;
-    if (showLoading) setLoading(true);
-    try {
-      const [listRes, quotaRes] = await Promise.all([listAllOfflineFiles(page), getOfflineQuotaInfo()]);
-      const mapped: Row[] = listRes.offlineFiles.map((f) => ({
-        key: f.infoHash || f.url,
-        name: f.name,
-        sizeMB: Number(f.size || 0) / (1024 * 1024),
-        url: f.url,
-        status: f.status,
-        percendDonePct: f.percendDone,
-        infoHash: f.infoHash,
-        addTime: (() => {
-          const v = Number(f.addTime || 0);
-          if (!v) return undefined;
-          return v > 1e12 ? v : v * 1000;
-        })(),
-      }));
-      let finalRows = mapped;
+  const doFetchAll = useCallback(
+    async (showLoading: boolean) => {
+      const thisReqId = ++reqIdRef.current;
+      if (showLoading) setLoading(true);
+      try {
+        const [listRes, quotaRes] = await Promise.all([listAllOfflineFiles(page), getOfflineQuotaInfo()]);
+        const mapped: Row[] = listRes.offlineFiles.map((f) => ({
+          key: f.infoHash || f.url,
+          name: f.name,
+          sizeMB: Number(f.size || 0) / (1024 * 1024),
+          url: f.url,
+          status: f.status,
+          percendDonePct: f.percendDone,
+          infoHash: f.infoHash,
+          addTime: (() => {
+            const v = Number(f.addTime || 0);
+            if (!v) return undefined;
+            return v > 1e12 ? v : v * 1000;
+          })(),
+        }));
+        let finalRows = mapped;
 
-      // 置顶排序：匹配 pinnedHashes 的行排在最前面（必要时跨页补齐）
-      const pinned = pinnedHashesRef.current;
-      if (pinned.size > 0) {
-        const top: Row[] = [];
-        const rest: Row[] = [];
-        const matchedHashes = new Set<string>();
+        // 置顶排序：匹配 pinnedHashes 的行排在最前面（必要时跨页补齐）
+        const pinned = pinnedHashesRef.current;
+        if (pinned.size > 0) {
+          const top: Row[] = [];
+          const rest: Row[] = [];
+          const matchedHashes = new Set<string>();
 
-        for (const r of mapped) {
-          const hash = getRowHash(r);
-          if (hash && pinned.has(hash)) {
-            matchedHashes.add(hash);
-            top.push(r);
-          } else {
-            rest.push(r);
+          for (const r of mapped) {
+            const hash = getRowHash(r);
+            if (hash && pinned.has(hash)) {
+              matchedHashes.add(hash);
+              top.push(r);
+            } else {
+              rest.push(r);
+            }
           }
+
+          let extraPinned: Row[] = [];
+          if (matchedHashes.size < pinned.size) {
+            const missingHashes = new Set<string>();
+            for (const h of pinned) {
+              if (!matchedHashes.has(h)) missingHashes.add(h);
+            }
+            extraPinned = await findPinnedRows(missingHashes, listRes.pageCount, page);
+          }
+
+          if (thisReqId !== reqIdRef.current) return;
+
+          const merged: Row[] = [];
+          const seenHashes = new Set<string>();
+          const pushDedup = (r: Row) => {
+            const hash = getRowHash(r);
+            if (hash && seenHashes.has(hash)) return;
+            if (hash) seenHashes.add(hash);
+            merged.push(r);
+          };
+
+          for (const r of top) pushDedup(r);
+          for (const r of extraPinned) pushDedup(r);
+          for (const r of rest) pushDedup(r);
+          finalRows = merged.slice(0, PAGE_SIZE);
         }
 
-        let extraPinned: Row[] = [];
-        if (matchedHashes.size < pinned.size) {
-          const missingHashes = new Set<string>();
-          for (const h of pinned) {
-            if (!matchedHashes.has(h)) missingHashes.add(h);
-          }
-          extraPinned = await findPinnedRows(missingHashes, listRes.pageCount, page);
+        if (thisReqId === reqIdRef.current) {
+          setRows(finalRows);
+          setTotal(listRes.totalCount);
+          setQuota(quotaRes);
         }
-
-        if (thisReqId !== reqIdRef.current) return;
-
-        const merged: Row[] = [];
-        const seenHashes = new Set<string>();
-        const pushDedup = (r: Row) => {
-          const hash = getRowHash(r);
-          if (hash && seenHashes.has(hash)) return;
-          if (hash) seenHashes.add(hash);
-          merged.push(r);
-        };
-
-        for (const r of top) pushDedup(r);
-        for (const r of extraPinned) pushDedup(r);
-        for (const r of rest) pushDedup(r);
-        finalRows = merged.slice(0, PAGE_SIZE);
+      } catch (err) {
+        if (showLoading) message.error((err as Error)?.message || "加载失败");
+      } finally {
+        if (showLoading) setLoading(false);
       }
-
-      if (thisReqId === reqIdRef.current) {
-        setRows(finalRows);
-        setTotal(listRes.totalCount);
-        setQuota(quotaRes);
-      }
-    } catch (err) {
-      if (showLoading) message.error((err as Error)?.message || "加载失败");
-    } finally {
-      if (showLoading) setLoading(false);
-    }
-  }, [message, page]);
+    },
+    [message, page],
+  );
 
   /** 手动刷新（带 loading 动画，清除置顶） */
   const fetchAll = useCallback(() => {
@@ -255,7 +290,10 @@ export function OfflineTasksTab() {
 
   // 是否有活跃（未完成）的离线任务
   const hasActiveTask = useMemo(
-    () => rows.some((r) => r.status === OfflineFileStatus.OFFLINE_INIT || r.status === OfflineFileStatus.OFFLINE_DOWNLOADING),
+    () =>
+      rows.some(
+        (r) => r.status === OfflineFileStatus.OFFLINE_INIT || r.status === OfflineFileStatus.OFFLINE_DOWNLOADING,
+      ),
     [rows],
   );
 
@@ -367,10 +405,7 @@ export function OfflineTasksTab() {
       modal.confirm({
         title: "删除/取消任务？",
         content: (
-          <Checkbox
-            defaultChecked={shouldDeleteFiles}
-            onChange={(e) => toggleDeleteFiles(e.target.checked)}
-          >
+          <Checkbox defaultChecked={shouldDeleteFiles} onChange={(e) => toggleDeleteFiles(e.target.checked)}>
             同时删除已下载文件
           </Checkbox>
         ),
@@ -387,10 +422,7 @@ export function OfflineTasksTab() {
     modal.confirm({
       title: `删除/取消 ${selected.length} 个任务？`,
       content: (
-        <Checkbox
-          defaultChecked={shouldDeleteFiles}
-          onChange={(e) => toggleDeleteFiles(e.target.checked)}
-        >
+        <Checkbox defaultChecked={shouldDeleteFiles} onChange={(e) => toggleDeleteFiles(e.target.checked)}>
           同时删除已下载文件
         </Checkbox>
       ),
@@ -400,120 +432,260 @@ export function OfflineTasksTab() {
     });
   }, [doRemove, modal, selected, shouldDeleteFiles, toggleDeleteFiles]);
 
-  const locateFile = useCallback(async (row: Row) => {
-    try {
-      const cfg = getConfig();
-      const parentPath = cfg.offlineDestPath || "/";
-      const file = await findFileByPath(parentPath, row.name);
-      if (!file) {
-        message.warning("未找到文件，可能位于子目录或已被移动");
-        return;
+  const locateFile = useCallback(
+    async (row: Row) => {
+      try {
+        const cfg = getConfig();
+        const parentPath = cfg.offlineDestPath || "/";
+        const file = await findFileByPath(parentPath, row.name);
+        if (!file) {
+          message.warning("未找到文件，可能位于子目录或已被移动");
+          return;
+        }
+        const baseUrl = cfg.grpcBaseUrl.replace(/\/$/, "");
+        const webUrl = `${baseUrl}/?page=files&path=${encodeURIComponent(file.fullPathName)}`;
+        window.open(webUrl, "_blank");
+      } catch (e) {
+        message.error(`定位失败：${(e as Error).message}`);
       }
-      const baseUrl = cfg.grpcBaseUrl.replace(/\/$/, "");
-      const webUrl = `${baseUrl}/?page=files&path=${encodeURIComponent(file.fullPathName)}`;
-      window.open(webUrl, "_blank");
-    } catch (e) {
-      message.error(`定位失败：${(e as Error).message}`);
-    }
-  }, [message]);
+    },
+    [message],
+  );
 
-  /** 公共：解析目标文件（含文件夹穿透） */
+  /** 公共：解析目标文件（含文件夹穿透，支持蓝光目录BFS广搜） */
   const resolveTargetFile = useCallback(async (row: Row) => {
     const cfg = getConfig();
     const parentPath = cfg.offlineDestPath || "/";
-    let file = await findFileByPath(parentPath, row.name);
-    if (!file) return undefined;
-    if (file.isDirectory) {
-      const subFiles = await listSubFiles(file.fullPathName);
-      const mediaExts = [".mp4", ".mkv", ".avi", ".rmvb", ".mov", ".flv", ".ts"];
-      const mediaFiles = subFiles.filter(f => !f.isDirectory && mediaExts.some(ext => f.name.toLowerCase().endsWith(ext)));
-      if (mediaFiles.length > 0) {
-        file = mediaFiles.reduce((prev, cur) => (Number(prev.size || 0) > Number(cur.size || 0) ? prev : cur));
-      } else {
-        return undefined;
+    let rootFile = await findFileByPath(parentPath, row.name);
+    if (!rootFile) return undefined;
+    if (!rootFile.isDirectory) return rootFile;
+
+    const mediaExts = [".mp4", ".mkv", ".avi", ".rmvb", ".mov", ".flv", ".ts", ".m2ts", ".iso"];
+    const isMedia = (f: { name: string; isDirectory?: boolean }) =>
+      !f.isDirectory && mediaExts.some((ext) => f.name.toLowerCase().endsWith(ext));
+
+    let largestMediaFile: typeof rootFile | undefined = undefined;
+    let maxMediaSize = -1;
+
+    const queue: { path: string; depth: number }[] = [{ path: rootFile.fullPathName, depth: 1 }];
+    let queryCount = 0;
+    const MAX_DEPTH = 3;
+    const MAX_QUERIES = 20;
+
+    while (queue.length > 0 && queryCount < MAX_QUERIES) {
+      const { path, depth } = queue.shift()!;
+      queryCount++;
+
+      try {
+        const subFiles = await listSubFiles(path);
+
+        for (const f of subFiles) {
+          if (isMedia(f)) {
+            const size = Number(f.size || 0);
+            if (size > maxMediaSize) {
+              maxMediaSize = size;
+              largestMediaFile = f;
+            }
+          }
+        }
+
+        if (depth < MAX_DEPTH) {
+          const subDirs = subFiles.filter((f) => f.isDirectory);
+          if (subDirs.length > 0) {
+            const bdmvDir = subDirs.find((d) => d.name.toUpperCase() === "BDMV");
+            const streamDir = subDirs.find((d) => d.name.toUpperCase() === "STREAM");
+            const pUpper = path.toUpperCase();
+            const isInsideBdmv = pUpper.endsWith("/BDMV") || pUpper.endsWith("\\BDMV");
+
+            if (bdmvDir) {
+              queue.length = 0;
+              queue.push({ path: bdmvDir.fullPathName, depth: depth + 1 });
+            } else if (isInsideBdmv && streamDir) {
+              queue.length = 0;
+              queue.push({ path: streamDir.fullPathName, depth: depth + 1 });
+            } else {
+              for (const d of subDirs) queue.push({ path: d.fullPathName, depth: depth + 1 });
+            }
+          }
+        }
+      } catch (e) {
+        console.warn(`[cd2] resolveTargetFile scan failed for ${path}`, e);
       }
     }
-    return file;
+
+    return largestMediaFile;
   }, []);
 
-  /** 播放：优先使用 artplayer 脚本（如已安装），否则新标签页打开 */
-  const playFile = useCallback(async (row: Row) => {
-    const hide = message.loading("正在获取播放地址...", 0);
-    try {
-      const file = await resolveTargetFile(row);
-      if (!file) {
-        message.warning("未找到可播放的媒体文件，请在 CloudDrive2 网页端查看。");
-        return;
-      }
-      const cfg = getConfig();
-      const urlInfo = await getDownloadUrlPath(file.fullPathName, true);
+  /** 播放：支持网页端和本地外部播放器串流 */
+  const playFile = useCallback(
+    async (row: Row, playerType: "web" | "potplayer" | "vlc" | "iina" | "infuse" | "dandanplay" = "web") => {
+      const hide = message.loading(`正在获取${playerType === "web" ? "播放" : "串流"}地址...`, 0);
+      try {
+        const file = await resolveTargetFile(row);
+        if (!file) {
+          message.warning("未找到可播放的媒体文件，请在 CloudDrive2 网页端查看。");
+          return;
+        }
 
-      let videoUrl = "";
-      if (urlInfo.downloadUrlPath) {
-        const baseUrl = cfg.grpcBaseUrl.replace(/\/$/, "");
-        const p = urlInfo.downloadUrlPath.startsWith("/") ? urlInfo.downloadUrlPath : `/${urlInfo.downloadUrlPath}`;
-        videoUrl = `${baseUrl}${p}`;
-      } else if (urlInfo.directUrl) {
-        videoUrl = urlInfo.directUrl;
-      }
+        // 当用户试图在网页端播放 ISO 或 BDMV 内的 M2TS 时，给出友好警告
+        if (
+          playerType === "web" &&
+          (file.name.toLowerCase().endsWith(".iso") || file.name.toLowerCase().endsWith(".m2ts"))
+        ) {
+          message.info("注意：当前文件格式在网页端可能无法播放，推荐使用外部播放器。");
+        }
 
-      if (!videoUrl) {
-        message.error("获取播放地址失败");
-        return;
-      }
+        const cfg = getConfig();
+        // 如果是外部播放器，也必须启用 preview = true。
+        // 因为 preview = false 返回的直链会锁定单线程附加下载模式，导致 PotPlayer 分片请求时触发“文件不存在或被锁定”。
+        const urlInfo = await getDownloadUrlPath(file.fullPathName, true);
 
-      // 使用 unsafeWindow 跨沙箱通信
-      const realWindow = (typeof unsafeWindow !== "undefined" ? unsafeWindow : window) as Window & { __cd2ArtplayerReady?: boolean };
+        let videoUrl = "";
+        if (urlInfo.downloadUrlPath) {
+          let p = urlInfo.downloadUrlPath;
+          let u: URL;
+          try {
+            u = new URL(cfg.grpcBaseUrl || window.location.origin);
+          } catch {
+            u = new URL(window.location.origin);
+          }
+          p = p.replace(/(\{SCHEME\}|%7BSCHEME%7D)/gi, u.protocol.replace(":", ""));
+          p = p.replace(/(\{HOST\}|%7BHOST%7D)/gi, u.host);
 
-      if (realWindow.__cd2ArtplayerReady) {
-        // artplayer 脚本已加载，通过事件播放
-        realWindow.dispatchEvent(new CustomEvent("cd2-play-video", {
-          detail: {
-            fileName: file.name,
-            filePath: file.fullPathName,
-            videoUrl,
-            grpcBaseUrl: cfg.grpcBaseUrl,
-            apiToken: cfg.apiToken,
-          },
-        }));
-      } else {
-        // artplayer 未安装，回退到新标签页打开
-        window.open(videoUrl, "_blank");
+          if (p.startsWith("http//")) p = p.replace("http//", "http://");
+          if (p.startsWith("https//")) p = p.replace("https//", "https://");
+
+          if (p.startsWith("http://") || p.startsWith("https://")) {
+            videoUrl = p;
+          } else {
+            const baseUrl = cfg.grpcBaseUrl.replace(/\/$/, "");
+            p = p.startsWith("/") ? p : `/${p}`;
+            videoUrl = `${baseUrl}${p}`;
+          }
+        } else if (urlInfo.directUrl) {
+          videoUrl = urlInfo.directUrl;
+        }
+
+        if (!videoUrl) {
+          message.error("获取播放地址失败");
+          return;
+        }
+
+        if (playerType !== "web") {
+          // 外部播放器调用逻辑
+          let externalUrl = "";
+          const encodedUrl = encodeURIComponent(videoUrl);
+          switch (playerType) {
+            case "potplayer":
+              externalUrl = `potplayer://${videoUrl}`;
+              break;
+            case "vlc":
+              externalUrl = `vlc://${videoUrl}`;
+              break;
+            case "iina":
+              externalUrl = `iina://weblink?url=${encodedUrl}`;
+              break;
+            case "infuse":
+              externalUrl = `infuse://x-callback-url/play?url=${encodedUrl}`;
+              break;
+            case "dandanplay":
+              // 匹配弹弹play协议：ddplay: 加 encode(播放地址|filePath=文件名)
+              externalUrl = `ddplay:${encodeURIComponent(`${videoUrl}|filePath=${file.name}`)}`;
+              break;
+          }
+          const a = document.createElement("a");
+          // 关键：使用 setAttribute 赋值，防止直接 a.href 赋值时浏览器协议解析器将 ://http:// 吃成 ://http//
+          a.setAttribute("href", externalUrl);
+          a.style.display = "none";
+          document.body.appendChild(a);
+          a.click();
+          setTimeout(() => document.body.removeChild(a), 500);
+          return;
+        }
+
+        // 使用 unsafeWindow 跨沙箱通信
+        const realWindow = (typeof unsafeWindow !== "undefined" ? unsafeWindow : window) as Window & {
+          __cd2ArtplayerReady?: boolean;
+        };
+
+        if (realWindow.__cd2ArtplayerReady) {
+          // artplayer 脚本已加载，通过事件播放
+          realWindow.dispatchEvent(
+            new CustomEvent("cd2-play-video", {
+              detail: {
+                fileName: file.name,
+                filePath: file.fullPathName,
+                videoUrl,
+                grpcBaseUrl: cfg.grpcBaseUrl,
+                apiToken: cfg.apiToken,
+              },
+            }),
+          );
+        } else {
+          // artplayer 未安装，回退到新标签页打开
+          window.open(videoUrl, "_blank");
+        }
+      } catch (e) {
+        message.error(`播放失败：${(e as Error).message}`);
+      } finally {
+        hide();
       }
-    } catch (e) {
-      message.error(`播放失败：${(e as Error).message}`);
-    } finally {
-      hide();
-    }
-  }, [message, resolveTargetFile]);
+    },
+    [message, resolveTargetFile],
+  );
 
   /** 下载：preview=false，走附件下载模式 */
-  const downloadFile = useCallback(async (row: Row) => {
-    const hide = message.loading("正在获取下载地址...", 0);
-    try {
-      const file = await resolveTargetFile(row);
-      if (!file) {
-        message.warning("未找到可下载的文件，请在 CloudDrive2 网页端查看。");
-        return;
-      }
-      const cfg = getConfig();
-      const urlInfo = await getDownloadUrlPath(file.fullPathName, false);
-      if (urlInfo.downloadUrlPath) {
-        const baseUrl = cfg.grpcBaseUrl.replace(/\/$/, "");
-        const p = urlInfo.downloadUrlPath.startsWith("/") ? urlInfo.downloadUrlPath : `/${urlInfo.downloadUrlPath}`;
-        window.open(`${baseUrl}${p}`, "_blank");
-      } else if (urlInfo.directUrl) {
-        window.open(urlInfo.directUrl, "_blank");
-      } else {
-        message.error("获取下载地址失败");
-      }
-    } catch (e) {
-      message.error(`下载失败：${(e as Error).message}`);
-    } finally {
-      hide();
-    }
-  }, [message, resolveTargetFile]);
+  const downloadFile = useCallback(
+    async (row: Row) => {
+      const hide = message.loading("正在获取下载地址...", 0);
+      try {
+        const file = await resolveTargetFile(row);
+        if (!file) {
+          message.warning("未找到可下载的文件，请在 CloudDrive2 网页端查看。");
+          return;
+        }
+        const cfg = getConfig();
+        const urlInfo = await getDownloadUrlPath(file.fullPathName, false);
 
+        let downloadUrl = "";
+        if (urlInfo.downloadUrlPath) {
+          let p = urlInfo.downloadUrlPath;
+          let u: URL;
+          try {
+            u = new URL(cfg.grpcBaseUrl || window.location.origin);
+          } catch {
+            u = new URL(window.location.origin);
+          }
+          p = p.replace(/(\{SCHEME\}|%7BSCHEME%7D)/gi, u.protocol.replace(":", ""));
+          p = p.replace(/(\{HOST\}|%7BHOST%7D)/gi, u.host);
+
+          if (p.startsWith("http//")) p = p.replace("http//", "http://");
+          if (p.startsWith("https//")) p = p.replace("https//", "https://");
+
+          if (p.startsWith("http://") || p.startsWith("https://")) {
+            downloadUrl = p;
+          } else {
+            const baseUrl = cfg.grpcBaseUrl.replace(/\/$/, "");
+            p = p.startsWith("/") ? p : `/${p}`;
+            downloadUrl = `${baseUrl}${p}`;
+          }
+        } else if (urlInfo.directUrl) {
+          downloadUrl = urlInfo.directUrl;
+        }
+
+        if (downloadUrl) {
+          window.open(downloadUrl, "_blank");
+        } else {
+          message.error("获取下载地址失败");
+        }
+      } catch (e) {
+        message.error(`下载失败：${(e as Error).message}`);
+      } finally {
+        hide();
+      }
+    },
+    [message, resolveTargetFile],
+  );
 
   const columns: ColumnsType<Row> = useMemo(
     () => [
@@ -549,7 +721,7 @@ export function OfflineTasksTab() {
       {
         title: "操作",
         key: "actions",
-        width: 140,
+        width: 210,
         render: (_: unknown, r: Row) => (
           <Space size={2}>
             {r.status === OfflineFileStatus.OFFLINE_FINISHED && (
@@ -557,9 +729,50 @@ export function OfflineTasksTab() {
                 <Tooltip title="定位">
                   <Button size="small" type="text" icon={<FolderOpenOutlined />} onClick={() => locateFile(r)} />
                 </Tooltip>
-                <Tooltip title="播放">
-                  <Button size="small" type="text" icon={<PlayCircleOutlined />} onClick={() => playFile(r)} />
-                </Tooltip>
+
+                <Dropdown
+                  key={defaultPlayer}
+                  trigger={["contextMenu"]}
+                  menu={{
+                    items: Object.entries(PLAYER_CONFIG).map(([key, item]) => ({
+                      key,
+                      label: item.label,
+                      icon: item.iconUrl ? (
+                        <img src={item.iconUrl} alt={key} style={{ width: 16, height: 16 }} />
+                      ) : (
+                        <span>{item.fallbackText}</span>
+                      ),
+                    })),
+                    onClick: ({ key, domEvent }) => {
+                      domEvent.stopPropagation();
+                      setDefaultPlayer(key as any);
+                      localStorage.setItem("cd2_default_player", key);
+                    },
+                  }}
+                >
+                  <Button
+                    size="small"
+                    type="text"
+                    title="左键播放，右键选择播放器"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      playFile(r, defaultPlayer);
+                    }}
+                    icon={
+                      PLAYER_CONFIG[defaultPlayer].iconUrl ? (
+                        <img
+                          src={PLAYER_CONFIG[defaultPlayer].iconUrl}
+                          alt="player"
+                          style={{ width: 16, height: 16, objectFit: "contain" }}
+                        />
+                      ) : (
+                        <span>{PLAYER_CONFIG[defaultPlayer].fallbackText}</span>
+                      )
+                    }
+                  />
+                </Dropdown>
+
                 <Tooltip title="下载">
                   <Button size="small" type="text" icon={<DownloadOutlined />} onClick={() => downloadFile(r)} />
                 </Tooltip>
@@ -575,7 +788,7 @@ export function OfflineTasksTab() {
         ),
       },
     ],
-    [copyUrl, formatBytes, removeOne, statusText, locateFile, playFile, downloadFile],
+    [copyUrl, formatBytes, removeOne, statusText, locateFile, playFile, downloadFile, defaultPlayer],
   );
 
   const rowSelection = {
@@ -605,6 +818,7 @@ export function OfflineTasksTab() {
 
       <Table<Row>
         size="small"
+        key={`table_${defaultPlayer}`}
         rowKey={(r) => r.key}
         columns={columns}
         dataSource={rows}

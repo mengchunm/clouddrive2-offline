@@ -25,10 +25,7 @@ function parseHeaders(raw: string | undefined): Headers {
 }
 
 /** 准备请求 body */
-async function prepareBody(
-  init: RequestInit,
-  input: RequestInfo | URL,
-): Promise<string | ArrayBuffer | undefined> {
+async function prepareBody(init: RequestInit, input: RequestInfo | URL): Promise<string | ArrayBuffer | undefined> {
   const body =
     init.body ?? (typeof input === "object" && input instanceof Request ? (input as Request).body : undefined);
   if (body instanceof ReadableStream) {

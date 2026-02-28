@@ -42,7 +42,7 @@ export function App({ hasMagnet }: AppProps) {
           panelVisible={panelVisible}
           onTogglePanel={togglePanel}
         />
-        {hasMagnet && panelVisible && <FloatingPanel />}
+        {hasMagnet && panelVisible && <FloatingPanel onOpenSettings={() => setSettingsOpen(true)} />}
       </AntdApp>
     </ConfigProvider>
   );

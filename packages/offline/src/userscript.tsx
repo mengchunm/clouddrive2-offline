@@ -135,7 +135,6 @@ function collectMagnetCheckboxes(): { checkbox: HTMLInputElement; magnetUrl: str
   return results;
 }
 
-
 // ─── 按钮创建 ──────────────────────────────────────────
 
 function createIconBtn(magnetUrl: string): HTMLButtonElement {
@@ -339,7 +338,8 @@ function findMeaningfulParent(el: HTMLElement): HTMLElement | null {
   const processPage = () => {
     const single = collectSingleMagnetElements();
     const checks = collectMagnetCheckboxes();
-    const pageHasMagnet = single.length > 0 || checks.length > 0;
+    const isLocalhostCD2 = window.location.href.startsWith("http://localhost:19798/");
+    const pageHasMagnet = single.length > 0 || checks.length > 0 || isLocalhostCD2;
     renderApp(pageHasMagnet);
     injectSingleButtons(single);
     injectBatchButtons(checks);
