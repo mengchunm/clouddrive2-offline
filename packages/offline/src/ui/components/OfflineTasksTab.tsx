@@ -10,6 +10,7 @@ import {
   listAllOfflineFiles,
   listSubFiles,
   removeOfflineFilesBulk,
+  submitOffline,
   subscribePushMessage,
 } from "@/grpc/client";
 import { OfflineFileStatus } from "@/proto/clouddrive_pb";
@@ -160,6 +161,7 @@ export function OfflineTasksTab() {
   const [quota, setQuota] = useState<{ total: number; used: number; left: number } | null>(null);
   const [selected, setSelected] = useState<React.Key[]>([]);
   const [shouldDeleteFiles, setShouldDeleteFiles] = useState(() => getDeleteFiles());
+  const [missingTasks, setMissingTasks] = useState<Set<string>>(new Set());
   const [defaultPlayer, setDefaultPlayer] = useState<"web" | "potplayer" | "vlc" | "iina" | "infuse" | "dandanplay">(
     () =>
       (localStorage.getItem("cd2_default_player") as "web" | "potplayer" | "vlc" | "iina" | "infuse" | "dandanplay") ||
@@ -233,6 +235,32 @@ export function OfflineTasksTab() {
           for (const r of extraPinned) pushDedup(r);
           for (const r of rest) pushDedup(r);
           finalRows = merged.slice(0, PAGE_SIZE);
+        }
+
+        const tasksToCheck = finalRows.filter((r) => r.status === OfflineFileStatus.OFFLINE_FINISHED && (showLoading || (getRowHash(r) && pinned.has(getRowHash(r)!))));
+        if (tasksToCheck.length > 0) {
+          const missing = new Set<string>();
+          const present = new Set<string>();
+          const cfg = getConfig();
+          const parentPath = cfg.offlineDestPath || "/";
+          await Promise.all(
+            tasksToCheck.map(async (r) => {
+              try {
+                const f = await findFileByPath(parentPath, r.name);
+                if (!f) missing.add(r.key); // file is missing
+                else present.add(r.key);    // file is present
+              } catch {
+                missing.add(r.key);
+              }
+            }),
+          );
+          if (thisReqId !== reqIdRef.current) return;
+          setMissingTasks((prev) => {
+            const next = new Set(prev);
+            missing.forEach((k) => next.add(k));
+            present.forEach((k) => next.delete(k));
+            return next;
+          });
         }
 
         if (thisReqId === reqIdRef.current) {
@@ -388,6 +416,51 @@ export function OfflineTasksTab() {
         window.dispatchEvent(new CustomEvent("cd2-task-deleted"));
       } catch (err) {
         message.error((err as Error)?.message || "操作失败");
+      }
+    },
+    [message],
+  );
+
+  const reDownload = useCallback(
+    async (row: Row) => {
+      const hideMsg = message.loading("正在重新提交...", 0);
+      try {
+        await removeOfflineFilesBulk([row.infoHash || row.key], false);
+        // Wait for the server to clear the cache/database before resubmitting
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        const cfg = getConfig();
+        const res = await submitOffline(row.url, cfg.offlineDestPath);
+        if (res.ok) {
+          message.success("已重新提交下载");
+          hideMsg();
+
+          try {
+            await listSubFiles(cfg.offlineDestPath || "/", true);
+          } catch (e) {
+            console.warn("Failed to force refresh directory", e);
+          }
+          await new Promise((resolve) => setTimeout(resolve, 500));
+
+          // 立即从缺失集合中移除，以免UI因旧状态渲染为红色
+          setMissingTasks((prev) => {
+            const next = new Set(prev);
+            next.delete(row.key);
+            if (row.infoHash) next.delete(row.infoHash);
+            return next;
+          });
+
+          window.dispatchEvent(new CustomEvent("cd2-task-submitted", { detail: { urls: row.url } }));
+        } else {
+          hideMsg();
+          if (res.alreadyExists) {
+            message.error("提交失败: 任务已存在 (服务端未及时清除)");
+          } else {
+            message.error(res.errorMessage || "提交失败");
+          }
+        }
+      } catch (err) {
+        hideMsg();
+        message.error("重试失败：" + (err as Error).message);
       }
     },
     [message],
@@ -700,12 +773,19 @@ export function OfflineTasksTab() {
         key: "info",
         width: 120,
         render: (_: unknown, r: Row) => {
+          const isMissing = missingTasks.has(r.key);
           const st = statusText(r.status);
           return (
             <Space direction="vertical" size={0} style={{ lineHeight: 1.3 }}>
-              <Tag color={st.color} style={{ margin: 0 }}>
-                {st.text} {r.percendDonePct}%
-              </Tag>
+              {isMissing ? (
+                <Tag color="error" style={{ margin: 0 }}>
+                  文件已转移/删除
+                </Tag>
+              ) : (
+                <Tag color={st.color} style={{ margin: 0 }}>
+                  {st.text} {r.percendDonePct}%
+                </Tag>
+              )}
               <Typography.Text type="secondary" style={{ fontSize: 11 }}>
                 {formatBytes(r.sizeMB)}
               </Typography.Text>
@@ -717,73 +797,82 @@ export function OfflineTasksTab() {
         title: "操作",
         key: "actions",
         width: 210,
-        render: (_: unknown, r: Row) => (
-          <Space size={2}>
-            {r.status === OfflineFileStatus.OFFLINE_FINISHED && (
-              <>
-                <Tooltip title="定位">
-                  <Button size="small" type="text" icon={<FolderOpenOutlined />} onClick={() => locateFile(r)} />
-                </Tooltip>
+        render: (_: unknown, r: Row) => {
+          const isMissing = missingTasks.has(r.key);
+          return (
+            <Space size={2}>
+              {r.status === OfflineFileStatus.OFFLINE_FINISHED && (
+                isMissing ? (
+                  <Tooltip title="重新下载此任务">
+                    <Button size="small" type="text" icon={<ReloadOutlined />} onClick={() => reDownload(r)} />
+                  </Tooltip>
+                ) : (
+                  <>
+                    <Tooltip title="定位">
+                      <Button size="small" type="text" icon={<FolderOpenOutlined />} onClick={() => locateFile(r)} />
+                    </Tooltip>
 
-                <Dropdown
-                  key={defaultPlayer}
-                  trigger={["contextMenu"]}
-                  menu={{
-                    items: Object.entries(PLAYER_CONFIG).map(([key, item]) => ({
-                      key,
-                      label: item.label,
-                      icon: item.iconUrl ? (
-                        <img src={item.iconUrl} alt={key} style={{ width: 16, height: 16 }} />
-                      ) : (
-                        <span>{item.fallbackText}</span>
-                      ),
-                    })),
-                    onClick: ({ key, domEvent }) => {
-                      domEvent.stopPropagation();
-                      setDefaultPlayer(key as "web" | "potplayer" | "vlc" | "iina" | "infuse" | "dandanplay");
-                      localStorage.setItem("cd2_default_player", key);
-                    },
-                  }}
-                >
-                  <Button
-                    size="small"
-                    type="text"
-                    title="左键播放，右键选择播放器"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      playFile(r, defaultPlayer);
-                    }}
-                    icon={
-                      PLAYER_CONFIG[defaultPlayer].iconUrl ? (
-                        <img
-                          src={PLAYER_CONFIG[defaultPlayer].iconUrl}
-                          alt="player"
-                          style={{ width: 16, height: 16, objectFit: "contain" }}
-                        />
-                      ) : (
-                        <span>{PLAYER_CONFIG[defaultPlayer].fallbackText}</span>
-                      )
-                    }
-                  />
-                </Dropdown>
+                    <Dropdown
+                      key={defaultPlayer}
+                      trigger={["contextMenu"]}
+                      menu={{
+                        items: Object.entries(PLAYER_CONFIG).map(([key, item]) => ({
+                          key,
+                          label: item.label,
+                          icon: item.iconUrl ? (
+                            <img src={item.iconUrl} alt={key} style={{ width: 16, height: 16 }} />
+                          ) : (
+                            <span>{item.fallbackText}</span>
+                          ),
+                        })),
+                        onClick: ({ key, domEvent }) => {
+                          domEvent.stopPropagation();
+                          setDefaultPlayer(key as "web" | "potplayer" | "vlc" | "iina" | "infuse" | "dandanplay");
+                          localStorage.setItem("cd2_default_player", key);
+                        },
+                      }}
+                    >
+                      <Button
+                        size="small"
+                        type="text"
+                        title="左键播放，右键选择播放器"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          playFile(r, defaultPlayer);
+                        }}
+                        icon={
+                          PLAYER_CONFIG[defaultPlayer].iconUrl ? (
+                            <img
+                              src={PLAYER_CONFIG[defaultPlayer].iconUrl}
+                              alt="player"
+                              style={{ width: 16, height: 16, objectFit: "contain" }}
+                            />
+                          ) : (
+                            <span>{PLAYER_CONFIG[defaultPlayer].fallbackText}</span>
+                          )
+                        }
+                      />
+                    </Dropdown>
 
-                <Tooltip title="下载">
-                  <Button size="small" type="text" icon={<DownloadOutlined />} onClick={() => downloadFile(r)} />
-                </Tooltip>
-              </>
-            )}
-            <Tooltip title="复制链接">
-              <Button size="small" type="text" icon={<CopyOutlined />} onClick={() => copyUrl(r.url)} />
-            </Tooltip>
-            <Tooltip title="删除/取消">
-              <Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={() => removeOne(r)} />
-            </Tooltip>
-          </Space>
-        ),
+                    <Tooltip title="下载">
+                      <Button size="small" type="text" icon={<DownloadOutlined />} onClick={() => downloadFile(r)} />
+                    </Tooltip>
+                  </>
+                )
+              )}
+              <Tooltip title="复制链接">
+                <Button size="small" type="text" icon={<CopyOutlined />} onClick={() => copyUrl(r.url)} />
+              </Tooltip>
+              <Tooltip title="删除/取消">
+                <Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={() => removeOne(r)} />
+              </Tooltip>
+            </Space>
+          );
+        },
       },
     ],
-    [copyUrl, formatBytes, removeOne, statusText, locateFile, playFile, downloadFile, defaultPlayer],
+    [copyUrl, formatBytes, removeOne, statusText, locateFile, playFile, downloadFile, defaultPlayer, missingTasks, reDownload],
   );
 
   const rowSelection = {
@@ -815,6 +904,10 @@ export function OfflineTasksTab() {
         size="small"
         key={`table_${defaultPlayer}`}
         rowKey={(r) => r.key}
+        rowClassName={(r) => {
+          const hash = getRowHash(r);
+          return hash && pinnedHashesRef.current.has(hash) ? "cd2-row-highlight" : "";
+        }}
         columns={columns}
         dataSource={rows}
         loading={loading}

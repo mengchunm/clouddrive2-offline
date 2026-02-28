@@ -167,10 +167,11 @@ export async function getDownloadUrlPath(path: string, preview: boolean = false)
 /**
  * 获取文件夹下的所有子文件
  * @param path 文件夹路径
+ * @param forceRefresh 是否强制刷新目录缓存
  */
-export async function listSubFiles(path: string): Promise<CloudDriveFile[]> {
+export async function listSubFiles(path: string, forceRefresh: boolean = false): Promise<CloudDriveFile[]> {
   const client = getCloudDriveClient();
-  const req = create(ListSubFileRequestSchema, { path, forceRefresh: false });
+  const req = create(ListSubFileRequestSchema, { path, forceRefresh });
   const files: CloudDriveFile[] = [];
   try {
     for await (const res of client.getSubFiles(req)) {
