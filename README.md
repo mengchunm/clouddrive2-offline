@@ -19,14 +19,14 @@
 - 🎨 **UI 优化** - 更加现代化的极简透明悬浮图标
 - 🔗 **广域增强** - 不再局限于特定网站，通过正则广域检测全部磁力链接并发起批量离线
 
-### 2. [CloudDrive2 Artplayer](packages/artplayer)
+### ~~2. [CloudDrive2 Artplayer](packages/artplayer)~~申请api中，暂不维护
 
-基于 [ArtPlayer](https://artplayer.org/) 的 CloudDrive2 增强型视频播放器脚本。
+~~基于 [ArtPlayer](https://artplayer.org/) 的 CloudDrive2 增强型视频播放器脚本。~~
 
-**✨ 特性**
-- 📺 将 CloudDrive2 默认的简单播放器替换为功能强大的 ArtPlayer
-- 💬 **弹幕集成** - 自动匹配并加载 [弹弹Play](https://www.dandanplay.com/) 的弹幕资源
-- ⚙️ **多种控制** - 支持倍速、画质调节、截图等完备的播放器功能
+~~**✨ 特性**~~
+- ~~📺 将 CloudDrive2 默认的简单播放器替换为功能强大的 ArtPlayer~~
+- ~~💬 **弹幕集成** - 自动匹配并加载 [弹弹Play](https://www.dandanplay.com/) 的弹幕资源~~
+- ~~⚙️ **多种控制** - 支持倍速、画质调节、截图等完备的播放器功能~~
 
 ---
 

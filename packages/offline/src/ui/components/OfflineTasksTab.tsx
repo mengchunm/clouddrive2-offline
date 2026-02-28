@@ -4,9 +4,8 @@ import {
   DownloadOutlined,
   ReloadOutlined,
   FolderOpenOutlined,
-  PlayCircleOutlined,
 } from "@ant-design/icons";
-import { App as AntdApp, Button, Checkbox, Dropdown, Flex, Space, Table, Tag, Tooltip, Typography, Select } from "antd";
+import { App as AntdApp, Button, Checkbox, Dropdown, Flex, Space, Table, Tag, Tooltip, Typography, } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getConfig, getDeleteFiles, setDeleteFiles } from "@/config";
@@ -33,7 +32,6 @@ const PLAYER_CONFIG = {
   vlc: { label: "VLC", iconUrl: null, fallbackText: "🗼" },
   iina: { label: "IINA", iconUrl: null, fallbackText: "🎦" },
 } as const;
-
 
 type Row = {
   key: string;
@@ -456,7 +454,7 @@ export function OfflineTasksTab() {
   const resolveTargetFile = useCallback(async (row: Row) => {
     const cfg = getConfig();
     const parentPath = cfg.offlineDestPath || "/";
-    let rootFile = await findFileByPath(parentPath, row.name);
+    const rootFile = await findFileByPath(parentPath, row.name);
     if (!rootFile) return undefined;
     if (!rootFile.isDirectory) return rootFile;
 
@@ -464,7 +462,7 @@ export function OfflineTasksTab() {
     const isMedia = (f: { name: string; isDirectory?: boolean }) =>
       !f.isDirectory && mediaExts.some((ext) => f.name.toLowerCase().endsWith(ext));
 
-    let largestMediaFile: typeof rootFile | undefined = undefined;
+    let largestMediaFile: typeof rootFile | undefined ;
     let maxMediaSize = -1;
 
     const queue: { path: string; depth: number }[] = [{ path: rootFile.fullPathName, depth: 1 }];
