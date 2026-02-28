@@ -6,14 +6,14 @@
 import Artplayer from "artplayer";
 import artplayerPluginDanmuku from "artplayer-plugin-danmuku";
 import {
-	matchVideo,
-	searchEpisodes,
-	fetchComments,
-	convertToArtDanmaku,
-	hasCredentials,
 	type ArtDanmaku,
+	convertToArtDanmaku,
+	fetchComments,
+	hasCredentials,
 	type MatchItem,
+	matchVideo,
 	type SearchAnime,
+	searchEpisodes,
 } from "./dandanplay";
 
 let currentPlayer: Artplayer | null = null;
@@ -129,11 +129,15 @@ function createDanmakuPanel(playerContainer: HTMLDivElement) {
 	// 放在播放器容器的父级（overlay），而不是 artplayer 内部
 	playerContainer.parentElement?.appendChild(panel);
 
+	// biome-ignore lint/style/noNonNullAssertion: Guaranteed by DOM structure
 	const input = panel.querySelector<HTMLInputElement>(".cd2-dm-search input")!;
+	// biome-ignore lint/style/noNonNullAssertion: Guaranteed by DOM structure
 	const searchBtn = panel.querySelector<HTMLButtonElement>(
 		".cd2-dm-search button",
 	)!;
+	// biome-ignore lint/style/noNonNullAssertion: Guaranteed by DOM structure
 	const body = panel.querySelector<HTMLDivElement>(".cd2-dm-body")!;
+	// biome-ignore lint/style/noNonNullAssertion: Guaranteed by DOM structure
 	const closeBtn = panel.querySelector<HTMLButtonElement>(
 		".cd2-dm-close-panel",
 	)!;
@@ -166,10 +170,12 @@ function renderMatches(
 	}
 	const groups = new Map<string, MatchItem[]>();
 	for (const m of matches) {
-		(
-			groups.get(m.animeTitle) ||
-			(groups.set(m.animeTitle, []), groups.get(m.animeTitle)!)
-		).push(m);
+		let group = groups.get(m.animeTitle);
+		if (!group) {
+			group = [];
+			groups.set(m.animeTitle, group);
+		}
+		group.push(m);
 	}
 	for (const [title, items] of groups) {
 		const g = document.createElement("div");
@@ -281,6 +287,7 @@ export function destroyPlayer() {
 
 function applyDanmaku(danmaku: ArtDanmaku[]) {
 	if (!currentPlayer) return;
+	// biome-ignore lint/suspicious/noExplicitAny: Artplayer plugin type missing
 	const api = (currentPlayer as any).plugins?.artplayerPluginDanmuku;
 	if (api) {
 		api.config({ danmuku: danmaku });
@@ -304,11 +311,11 @@ export async function openPlayer(
 
 	// 弹幕状态文字（显示在控制栏）
 	let danmakuStatusText = "弹幕匹配中...";
-	let currentEpisodeId: number | undefined;
+	let _currentEpisodeId: number | undefined;
 
 	// 选集回调
 	const onSelectEpisode = async (episodeId: number, label: string) => {
-		currentEpisodeId = episodeId;
+		_currentEpisodeId = episodeId;
 		panelEls.hide();
 		danmakuStatusText = "加载中...";
 		updateControlText();

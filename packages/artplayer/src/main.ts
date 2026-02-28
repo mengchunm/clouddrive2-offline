@@ -13,14 +13,14 @@ import {
 	GM_registerMenuCommand,
 	unsafeWindow,
 } from "vite-plugin-monkey/dist/client";
-import { openPlayer, destroyPlayer } from "./player";
 import {
 	getAppId,
 	getAppSecret,
+	hasCredentials,
 	setAppId,
 	setAppSecret,
-	hasCredentials,
 } from "./dandanplay";
+import { destroyPlayer, openPlayer } from "./player";
 
 // ─── 播放事件类型定义 ────────────────────────────────────
 
@@ -107,6 +107,7 @@ function registerMenuCommands() {
 	}
 
 	// 标记 artplayer 已就绪（使用 unsafeWindow 跨沙箱通信）
+	// biome-ignore lint/suspicious/noExplicitAny: Required for unsafeWindow extension
 	(unsafeWindow as any).__cd2ArtplayerReady = true;
 
 	registerMenuCommands();

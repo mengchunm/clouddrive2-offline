@@ -13,9 +13,9 @@
  */
 
 import {
-	GM_xmlhttpRequest,
 	GM_getValue,
 	GM_setValue,
+	GM_xmlhttpRequest,
 } from "vite-plugin-monkey/dist/client";
 
 const API_BASE = "https://api.dandanplay.net";
@@ -220,8 +220,8 @@ export function convertToArtDanmaku(comments: DanmakuComment[]): ArtDanmaku[] {
 	return comments.map((c) => {
 		const parts = c.p.split(",");
 		const time = parseFloat(parts[0]) || 0;
-		const rawMode = parseInt(parts[1]) || 1;
-		const colorNum = parseInt(parts[2]) || 16777215;
+		const rawMode = parseInt(parts[1], 10) || 1;
+		const colorNum = parseInt(parts[2], 10) || 16777215;
 
 		// 弹弹Play mode: 1=普通 4=底部 5=顶部
 		let mode: 0 | 1 | 2 = 0;

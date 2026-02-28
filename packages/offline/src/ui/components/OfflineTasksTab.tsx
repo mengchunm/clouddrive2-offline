@@ -1,27 +1,20 @@
-import {
-  CopyOutlined,
-  DeleteOutlined,
-  DownloadOutlined,
-  ReloadOutlined,
-  FolderOpenOutlined,
-} from "@ant-design/icons";
-import { App as AntdApp, Button, Checkbox, Dropdown, Flex, Space, Table, Tag, Tooltip, Typography, } from "antd";
+import { CopyOutlined, DeleteOutlined, DownloadOutlined, FolderOpenOutlined, ReloadOutlined } from "@ant-design/icons";
+import { App as AntdApp, Button, Checkbox, Dropdown, Flex, Space, Table, Tag, Tooltip, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getConfig, getDeleteFiles, setDeleteFiles } from "@/config";
 import {
-  getOfflineQuotaInfo,
-  listAllOfflineFiles,
-  removeOfflineFilesBulk,
   findFileByPath,
   getDownloadUrlPath,
+  getOfflineQuotaInfo,
+  listAllOfflineFiles,
   listSubFiles,
+  removeOfflineFilesBulk,
   subscribePushMessage,
 } from "@/grpc/client";
 import { OfflineFileStatus } from "@/proto/clouddrive_pb";
-
-import potplayerImg from "../../../../../icon/potplayer.png";
 import infuseImg from "../../../../../icon/infuse.png";
+import potplayerImg from "../../../../../icon/potplayer.png";
 import dandanplayImg from "../../../../../icon/弹弹play.png";
 
 const PLAYER_CONFIG = {
@@ -168,7 +161,9 @@ export function OfflineTasksTab() {
   const [selected, setSelected] = useState<React.Key[]>([]);
   const [shouldDeleteFiles, setShouldDeleteFiles] = useState(() => getDeleteFiles());
   const [defaultPlayer, setDefaultPlayer] = useState<"web" | "potplayer" | "vlc" | "iina" | "infuse" | "dandanplay">(
-    () => (localStorage.getItem("cd2_default_player") as any) || "web",
+    () =>
+      (localStorage.getItem("cd2_default_player") as "web" | "potplayer" | "vlc" | "iina" | "infuse" | "dandanplay") ||
+      "web",
   );
   const reqIdRef = useRef(0);
   /** 最近提交的 btih hash 集合，用于置顶匹配 */
@@ -462,7 +457,7 @@ export function OfflineTasksTab() {
     const isMedia = (f: { name: string; isDirectory?: boolean }) =>
       !f.isDirectory && mediaExts.some((ext) => f.name.toLowerCase().endsWith(ext));
 
-    let largestMediaFile: typeof rootFile | undefined ;
+    let largestMediaFile: typeof rootFile | undefined;
     let maxMediaSize = -1;
 
     const queue: { path: string; depth: number }[] = [{ path: rootFile.fullPathName, depth: 1 }];
@@ -471,7 +466,9 @@ export function OfflineTasksTab() {
     const MAX_QUERIES = 20;
 
     while (queue.length > 0 && queryCount < MAX_QUERIES) {
-      const { path, depth } = queue.shift()!;
+      const item = queue.shift();
+      if (!item) break;
+      const { path, depth } = item;
       queryCount++;
 
       try {
@@ -743,7 +740,7 @@ export function OfflineTasksTab() {
                     })),
                     onClick: ({ key, domEvent }) => {
                       domEvent.stopPropagation();
-                      setDefaultPlayer(key as any);
+                      setDefaultPlayer(key as "web" | "potplayer" | "vlc" | "iina" | "infuse" | "dandanplay");
                       localStorage.setItem("cd2_default_player", key);
                     },
                   }}

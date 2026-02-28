@@ -18,8 +18,9 @@ import { App } from "./ui/App";
 // ─── 兼容处理 (Trusted Types) ──────────────────────────
 // 解决在 Google Gemini / AI Studio 等开启了核心严苛 CSP 的网站上，
 // React/Antd 插入包含内联样式的 DOM 时触发 TrustedHTML 报错的问题。
+// biome-ignore lint/suspicious/noExplicitAny: TrustedHTML polyfill requires any
 const w = window as any;
-if (typeof w.trustedTypes !== "undefined" && w.trustedTypes.createPolicy) {
+if (w.trustedTypes?.createPolicy) {
   try {
     const cd2Policy = w.trustedTypes.createPolicy("cd2-offline-policy", {
       createHTML: (s: string) => s,
