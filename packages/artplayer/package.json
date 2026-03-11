@@ -1,7 +1,7 @@
 {
 	"name": "clouddrive2-artplayer",
 	"version": "1.0.0",
-	"description": "基于 ArtPlayer 的 CloudDrive2 视频播放器，集成弹弹Play弹幕",
+	"description": "基于 ArtPlayer 的 CloudDrive2 视频播放器，集成 danmu_api 多源弹幕",
 	"private": true,
 	"author": {
 		"name": "saevio",

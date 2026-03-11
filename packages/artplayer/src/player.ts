@@ -9,12 +9,12 @@ import {
 	type ArtDanmaku,
 	convertToArtDanmaku,
 	fetchComments,
-	hasCredentials,
+	hasApiUrl,
 	type MatchItem,
 	matchVideo,
 	type SearchAnime,
 	searchEpisodes,
-} from "./dandanplay";
+} from "./danmu-api";
 
 let currentPlayer: Artplayer | null = null;
 let overlayEl: HTMLDivElement | null = null;
@@ -427,13 +427,13 @@ async function autoMatch(
 	const keyword = extractKeyword(fileName);
 	if (keyword) panelEls.input.value = keyword;
 
-	if (!hasCredentials()) {
-		setStatus("需配置API密钥");
+	if (!hasApiUrl()) {
+		setStatus("需配置API地址");
 		panelEls.body.innerHTML =
-			'<div class="cd2-dm-status">请先通过油猴菜单「⚙ 弹弹Play API 配置」设置 AppId 和 AppSecret<br><br>申请方式：发邮件到 kaedei@dandanplay.net<br>主题：弹弹play开放平台申请</div>';
+			'<div class="cd2-dm-status">请先通过油猴菜单「⚙ 弹幕 API 配置」设置弹幕 API 地址<br><br>支持自部署的 danmu_api 服务<br>项目地址：github.com/huangxd-/danmu_api</div>';
 		if (currentPlayer)
 			currentPlayer.notice.show =
-				"弹幕功能需配置弹弹Play API密钥，请在油猴菜单中设置";
+				"弹幕功能需配置 API 地址，请在油猴菜单中设置";
 		return;
 	}
 

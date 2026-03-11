@@ -20,12 +20,15 @@ import dandanplayImg from "../../../../../icon/弹弹play.png";
 
 const PLAYER_CONFIG = {
   web: { label: "网页播放", iconUrl: null, fallbackText: "🌐" },
+  artplayer: { label: "ArtPlayer", iconUrl: null, fallbackText: "🎬" },
   potplayer: { label: "PotPlayer", iconUrl: potplayerImg, fallbackText: "🎬" },
   dandanplay: { label: "弹弹Play", iconUrl: dandanplayImg, fallbackText: "📺" },
   infuse: { label: "Infuse", iconUrl: infuseImg, fallbackText: "🔥" },
   vlc: { label: "VLC", iconUrl: null, fallbackText: "🗼" },
   iina: { label: "IINA", iconUrl: null, fallbackText: "🎦" },
 } as const;
+
+type PlayerType = keyof typeof PLAYER_CONFIG;
 
 type Row = {
   key: string;
@@ -162,9 +165,9 @@ export function OfflineTasksTab() {
   const [selected, setSelected] = useState<React.Key[]>([]);
   const [shouldDeleteFiles, setShouldDeleteFiles] = useState(() => getDeleteFiles());
   const [missingTasks, setMissingTasks] = useState<Set<string>>(new Set());
-  const [defaultPlayer, setDefaultPlayer] = useState<"web" | "potplayer" | "vlc" | "iina" | "infuse" | "dandanplay">(
+  const [defaultPlayer, setDefaultPlayer] = useState<PlayerType>(
     () =>
-      (localStorage.getItem("cd2_default_player") as "web" | "potplayer" | "vlc" | "iina" | "infuse" | "dandanplay") ||
+      (localStorage.getItem("cd2_default_player") as PlayerType) ||
       "web",
   );
   const reqIdRef = useRef(0);
@@ -590,7 +593,7 @@ export function OfflineTasksTab() {
 
   /** 播放：支持网页端和本地外部播放器串流 */
   const playFile = useCallback(
-    async (row: Row, playerType: "web" | "potplayer" | "vlc" | "iina" | "infuse" | "dandanplay" = "web") => {
+    async (row: Row, playerType: PlayerType = "web") => {
       const hide = message.loading(`正在获取${playerType === "web" ? "播放" : "串流"}地址...`, 0);
       try {
         const file = await resolveTargetFile(row);
@@ -643,8 +646,39 @@ export function OfflineTasksTab() {
           return;
         }
 
-        if (playerType !== "web") {
-          // 外部播放器调用逻辑
+        // ArtPlayer 播放（内嵌弹幕播放器）
+        if (playerType === "artplayer" || playerType === "web") {
+          const realWindow = (typeof unsafeWindow !== "undefined" ? unsafeWindow : window) as Window & {
+            __cd2ArtplayerReady?: boolean;
+          };
+
+          if (realWindow.__cd2ArtplayerReady) {
+            realWindow.dispatchEvent(
+              new CustomEvent("cd2-play-video", {
+                detail: {
+                  fileName: file.name,
+                  filePath: file.fullPathName,
+                  videoUrl,
+                  grpcBaseUrl: cfg.grpcBaseUrl,
+                  apiToken: cfg.apiToken,
+                },
+              }),
+            );
+            return;
+          }
+
+          if (playerType === "artplayer") {
+            message.warning("ArtPlayer 油猴脚本未安装，请先安装 clouddrive2-artplayer 脚本。");
+            return;
+          }
+
+          // web 模式回退：artplayer 未安装时直接打开
+          window.open(videoUrl, "_blank");
+          return;
+        }
+
+        // 外部播放器调用逻辑
+        {
           let externalUrl = "";
           const encodedUrl = encodeURIComponent(videoUrl);
           switch (playerType) {
@@ -661,41 +695,15 @@ export function OfflineTasksTab() {
               externalUrl = `infuse://x-callback-url/play?url=${encodedUrl}`;
               break;
             case "dandanplay":
-              // 匹配弹弹play协议：ddplay: 加 encode(播放地址|filePath=文件名)
               externalUrl = `ddplay:${encodeURIComponent(`${videoUrl}|filePath=${file.name}`)}`;
               break;
           }
           const a = document.createElement("a");
-          // 关键：使用 setAttribute 赋值，防止直接 a.href 赋值时浏览器协议解析器将 ://http:// 吃成 ://http//
           a.setAttribute("href", externalUrl);
           a.style.display = "none";
           document.body.appendChild(a);
           a.click();
           setTimeout(() => document.body.removeChild(a), 500);
-          return;
-        }
-
-        // 使用 unsafeWindow 跨沙箱通信
-        const realWindow = (typeof unsafeWindow !== "undefined" ? unsafeWindow : window) as Window & {
-          __cd2ArtplayerReady?: boolean;
-        };
-
-        if (realWindow.__cd2ArtplayerReady) {
-          // artplayer 脚本已加载，通过事件播放
-          realWindow.dispatchEvent(
-            new CustomEvent("cd2-play-video", {
-              detail: {
-                fileName: file.name,
-                filePath: file.fullPathName,
-                videoUrl,
-                grpcBaseUrl: cfg.grpcBaseUrl,
-                apiToken: cfg.apiToken,
-              },
-            }),
-          );
-        } else {
-          // artplayer 未安装，回退到新标签页打开
-          window.open(videoUrl, "_blank");
         }
       } catch (e) {
         message.error(`播放失败：${(e as Error).message}`);
@@ -831,7 +839,7 @@ export function OfflineTasksTab() {
                         })),
                         onClick: ({ key, domEvent }) => {
                           domEvent.stopPropagation();
-                          setDefaultPlayer(key as "web" | "potplayer" | "vlc" | "iina" | "infuse" | "dandanplay");
+                          setDefaultPlayer(key as PlayerType);
                           localStorage.setItem("cd2_default_player", key);
                         },
                       }}

@@ -19,10 +19,10 @@ export default defineConfig({
 				namespace: "https://github.com/mengchunm/clouddrive2-artplayer",
 				author: "saevio",
 				description:
-					"CloudDrive2 视频播放器 - 基于 ArtPlayer，集成弹弹Play弹幕",
+					"CloudDrive2 视频播放器 - 基于 ArtPlayer，集成 danmu_api 多源弹幕",
 				homepage: "https://github.com/mengchunm/clouddrive2-artplayer",
 				match: ["https://*/*", "http://*/*"],
-				connect: ["api.dandanplay.net", "*"],
+				connect: ["*"],
 				grant: [
 					"GM_xmlhttpRequest",
 					"GM_registerMenuCommand",

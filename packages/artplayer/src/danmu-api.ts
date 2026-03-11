@@ -1,15 +1,16 @@
 /**
- * 弹弹Play 开放平台 API 封装
- * https://api.dandanplay.net
+ * danmu_api 弹幕服务 API 封装
+ * https://github.com/huangxd-/danmu_api
+ *
+ * 兼容弹弹Play接口规范，聚合多源弹幕（B站/爱奇艺/腾讯/优酷/芒果等）
  *
  * 接口列表：
- * - POST /api/v2/match   文件匹配
- * - GET  /api/v2/comment  获取弹幕
- * - GET  /api/v2/search/episodes  搜索剧集
+ * - POST /api/v2/match              文件匹配
+ * - GET  /api/v2/search/episodes    搜索剧集
+ * - GET  /api/v2/search/anime       搜索番剧
+ * - GET  /api/v2/comment/:commentId 获取弹幕
  *
- * 认证方式（2025年起强制）：
- *   请求头须包含 X-AppId / X-Timestamp / X-Signature
- *   X-Signature = base64(sha256(AppId + Timestamp + Path + AppSecret))
+ * 认证方式：API 地址中包含 token（默认 87654321）
  */
 
 import {
@@ -18,53 +19,21 @@ import {
 	GM_xmlhttpRequest,
 } from "vite-plugin-monkey/dist/client";
 
-const API_BASE = "https://api.dandanplay.net";
-
 // ─── 配置 ───────────────────────────────────────────────
 
-const CONFIG_KEY_APPID = "dandanplay_appid";
-const CONFIG_KEY_SECRET = "dandanplay_secret";
+const CONFIG_KEY_API_URL = "danmu_api_url";
+const DEFAULT_API_URL = "https://clouddrive2.netlify.app/87076677";
 
-export function getAppId(): string {
-	return (GM_getValue(CONFIG_KEY_APPID, "") as string).trim();
-}
-export function getAppSecret(): string {
-	return (GM_getValue(CONFIG_KEY_SECRET, "") as string).trim();
-}
-export function setAppId(v: string) {
-	GM_setValue(CONFIG_KEY_APPID, v.trim());
-}
-export function setAppSecret(v: string) {
-	GM_setValue(CONFIG_KEY_SECRET, v.trim());
-}
-export function hasCredentials(): boolean {
-	return getAppId().length > 0 && getAppSecret().length > 0;
+export function getApiUrl(): string {
+	return (GM_getValue(CONFIG_KEY_API_URL, DEFAULT_API_URL) as string).trim().replace(/\/+$/, "");
 }
 
-// ─── 签名 ───────────────────────────────────────────────
-
-async function sha256Base64(text: string): Promise<string> {
-	const data = new TextEncoder().encode(text);
-	const hash = await crypto.subtle.digest("SHA-256", data);
-	const bytes = new Uint8Array(hash);
-	let binary = "";
-	for (const b of bytes) binary += String.fromCharCode(b);
-	return btoa(binary);
+export function setApiUrl(v: string) {
+	GM_setValue(CONFIG_KEY_API_URL, v.trim().replace(/\/+$/, ""));
 }
 
-async function buildAuthHeaders(path: string): Promise<Record<string, string>> {
-	const appId = getAppId();
-	const appSecret = getAppSecret();
-	if (!appId || !appSecret) return {};
-
-	const timestamp = Math.floor(Date.now() / 1000).toString();
-	const signature = await sha256Base64(appId + timestamp + path + appSecret);
-
-	return {
-		"X-AppId": appId,
-		"X-Timestamp": timestamp,
-		"X-Signature": signature,
-	};
+export function hasApiUrl(): boolean {
+	return getApiUrl().length > 0;
 }
 
 // ─── Types ──────────────────────────────────────────────
@@ -168,11 +137,9 @@ function gmFetch<T>(
  * 通过文件名匹配番剧信息
  */
 export async function matchVideo(fileName: string): Promise<MatchResult> {
-	const path = "/api/v2/match";
-	const authHeaders = await buildAuthHeaders(path);
-	return gmFetch<MatchResult>(`${API_BASE}${path}`, {
+	const apiUrl = getApiUrl();
+	return gmFetch<MatchResult>(`${apiUrl}/api/v2/match`, {
 		method: "POST",
-		headers: authHeaders,
 		body: JSON.stringify({
 			fileName,
 			fileHash: "",
@@ -189,11 +156,9 @@ export async function matchVideo(fileName: string): Promise<MatchResult> {
 export async function searchEpisodes(
 	keyword: string,
 ): Promise<SearchEpisodeResult> {
-	const path = "/api/v2/search/episodes";
-	const authHeaders = await buildAuthHeaders(path);
+	const apiUrl = getApiUrl();
 	return gmFetch<SearchEpisodeResult>(
-		`${API_BASE}${path}?anime=${encodeURIComponent(keyword)}`,
-		{ headers: authHeaders },
+		`${apiUrl}/api/v2/search/episodes?anime=${encodeURIComponent(keyword)}`,
 	);
 }
 
@@ -205,16 +170,16 @@ export async function fetchComments(
 	episodeId: number,
 	withRelated = true,
 ): Promise<CommentResponse> {
-	const path = `/api/v2/comment/${episodeId}`;
-	const authHeaders = await buildAuthHeaders(path);
+	const apiUrl = getApiUrl();
 	return gmFetch<CommentResponse>(
-		`${API_BASE}${path}?withRelated=${withRelated}`,
-		{ headers: authHeaders },
+		`${apiUrl}/api/v2/comment/${episodeId}?withRelated=${withRelated}&format=json`,
 	);
 }
 
 /**
- * 将弹弹Play弹幕转换为 ArtPlayer danmuku 插件格式
+ * 将弹幕转换为 ArtPlayer danmuku 插件格式
+ * 弹幕 p 字段格式（兼容弹弹Play）: "time,mode,color,uid"
+ * mode: 1=普通滚动 4=底部 5=顶部
  */
 export function convertToArtDanmaku(comments: DanmakuComment[]): ArtDanmaku[] {
 	return comments.map((c) => {
@@ -223,7 +188,7 @@ export function convertToArtDanmaku(comments: DanmakuComment[]): ArtDanmaku[] {
 		const rawMode = parseInt(parts[1], 10) || 1;
 		const colorNum = parseInt(parts[2], 10) || 16777215;
 
-		// 弹弹Play mode: 1=普通 4=底部 5=顶部
+		// mode: 1=普通 4=底部 5=顶部
 		let mode: 0 | 1 | 2 = 0;
 		if (rawMode === 5) mode = 1;
 		else if (rawMode === 4) mode = 2;
@@ -244,7 +209,7 @@ export async function loadDanmaku(
 		const result = await matchVideo(fileName);
 
 		if (!result.isMatched || result.matches.length === 0) {
-			console.log("[cd2-artplayer] 弹弹Play未匹配到结果:", fileName);
+			console.log("[cd2-artplayer] 弹幕API未匹配到结果:", fileName);
 			return null;
 		}
 
