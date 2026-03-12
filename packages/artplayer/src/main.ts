@@ -16,7 +16,9 @@ import {
 	unsafeWindow,
 } from "vite-plugin-monkey/dist/client";
 import {
+	cycleDanmuMode,
 	getApiUrl,
+	getDanmuModeLabel,
 	hasApiUrl,
 	setApiUrl,
 } from "./danmu-api";
@@ -78,6 +80,11 @@ function showDanmuApiConfig() {
 function registerMenuCommands() {
 	GM_registerMenuCommand("⚙ 弹幕 API 配置", showDanmuApiConfig);
 
+	GM_registerMenuCommand(`🔄 弹幕模式: ${getDanmuModeLabel()}`, () => {
+		const newMode = cycleDanmuMode();
+		alert(`弹幕模式已切换为: ${getDanmuModeLabel(newMode)}\n\n下次播放时生效。`);
+	});
+
 	GM_registerMenuCommand("关闭播放器", () => {
 		destroyPlayer();
 	});
@@ -96,10 +103,10 @@ function registerMenuCommands() {
 (function main() {
 	console.log("[cd2-artplayer] 脚本已加载");
 
-	// 检查弹幕API配置
+	// 检查弹幕API配置（直连弹弹Play代理无需配置，此提示仅与后备API相关）
 	if (!hasApiUrl()) {
-		console.warn(
-			"[cd2-artplayer] 未配置弹幕 API 地址，弹幕功能不可用。请通过油猴菜单配置。",
+		console.info(
+			"[cd2-artplayer] 未配置弹幕 API 地址，将仅使用直连弹弹Play代理获取弹幕。",
 		);
 	}
 

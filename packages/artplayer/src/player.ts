@@ -8,7 +8,13 @@ import artplayerPluginDanmuku from "artplayer-plugin-danmuku";
 import {
 	type ArtDanmaku,
 	convertToArtDanmaku,
+	cycleDanmuMode,
+	directFetchComments,
+	directMatchVideo,
+	directSearchEpisodes,
 	fetchComments,
+	getDanmuMode,
+	getDanmuModeLabel,
 	hasApiUrl,
 	type MatchItem,
 	matchVideo,
@@ -73,6 +79,14 @@ function injectStyles() {
       background: none; border: none; color: #fff; opacity: 0.5; cursor: pointer; font-size: 18px;
     }
     .cd2-dm-panel .cd2-dm-header .cd2-dm-close-panel:hover { opacity: 1; }
+    .cd2-dm-panel .cd2-dm-header .cd2-dm-mode-badge {
+      font-size: 11px; padding: 2px 8px; border-radius: 4px; cursor: pointer;
+      background: rgba(22,119,255,0.2); color: #1677ff; border: 1px solid rgba(22,119,255,0.3);
+      transition: all 0.15s; white-space: nowrap; user-select: none;
+    }
+    .cd2-dm-panel .cd2-dm-header .cd2-dm-mode-badge:hover {
+      background: rgba(22,119,255,0.35); border-color: rgba(22,119,255,0.5);
+    }
     .cd2-dm-panel .cd2-dm-search {
       display: flex; gap: 8px; padding: 10px 16px; border-bottom: 1px solid rgba(255,255,255,0.06);
     }
@@ -115,6 +129,7 @@ function createDanmakuPanel(playerContainer: HTMLDivElement) {
 	panel.innerHTML = `
     <div class="cd2-dm-header">
       <span>弹幕搜索</span>
+      <span class="cd2-dm-mode-badge" title="点击切换匹配模式">${getDanmuModeLabel()}</span>
       <button class="cd2-dm-close-panel">✕</button>
     </div>
     <div class="cd2-dm-search">
@@ -149,10 +164,20 @@ function createDanmakuPanel(playerContainer: HTMLDivElement) {
 
 	closeBtn.onclick = () => panel.classList.remove("cd2-show");
 
+	// 模式切换徽章
+	// biome-ignore lint/style/noNonNullAssertion: Guaranteed by DOM structure
+	const modeBadge = panel.querySelector<HTMLSpanElement>(".cd2-dm-mode-badge")!;
+	modeBadge.onclick = () => {
+		const newMode = cycleDanmuMode();
+		modeBadge.textContent = getDanmuModeLabel(newMode);
+		if (currentPlayer)
+			currentPlayer.notice.show = `弹幕模式已切换为: ${getDanmuModeLabel(newMode)}`;
+	};
+
 	const toggle = () => panel.classList.toggle("cd2-show");
 	const hide = () => panel.classList.remove("cd2-show");
 
-	return { panel, input, searchBtn, body, toggle, hide };
+	return { panel, input, searchBtn, body, modeBadge, toggle, hide };
 }
 
 // ─── 渲染结果 ───────────────────────────────────────────
@@ -314,19 +339,23 @@ export async function openPlayer(
 	let _currentEpisodeId: number | undefined;
 
 	// 选集回调
-	const onSelectEpisode = async (episodeId: number, label: string) => {
+	// useDirect: true=使用直连弹弹Play代理, false=使用danmu_api服务
+	const onSelectEpisode = async (episodeId: number, label: string, useDirect = false) => {
 		_currentEpisodeId = episodeId;
 		panelEls.hide();
 		danmakuStatusText = "加载中...";
 		updateControlText();
 		try {
-			const comments = await fetchComments(episodeId);
+			const comments = useDirect
+				? await directFetchComments(episodeId)
+				: await fetchComments(episodeId);
 			const danmaku = convertToArtDanmaku(comments.comments);
 			applyDanmaku(danmaku);
-			danmakuStatusText = `${label} | ${danmaku.length}条`;
+			const source = useDirect ? "直连" : "API";
+			danmakuStatusText = `${label} | ${danmaku.length}条(${source})`;
 			updateControlText();
 			if (currentPlayer)
-				currentPlayer.notice.show = `已加载 ${danmaku.length} 条弹幕`;
+				currentPlayer.notice.show = `已加载 ${danmaku.length} 条弹幕(${source})`;
 		} catch (err) {
 			danmakuStatusText = "加载失败";
 			updateControlText();
@@ -335,16 +364,49 @@ export async function openPlayer(
 		}
 	};
 
-	// 搜索功能
+	// 搜索功能（根据当前模式决定搜索方式）
 	const doSearch = async () => {
 		const kw = panelEls.input.value.trim();
 		if (!kw) return;
 		panelEls.body.innerHTML = '<div class="cd2-dm-status">搜索中...</div>';
+		const searchMode = getDanmuMode();
+
+		// 仅API模式
+		if (searchMode === "api") {
+			if (!hasApiUrl()) {
+				panelEls.body.innerHTML = '<div class="cd2-dm-status">未配置API地址，请先在油猴菜单中设置</div>';
+				return;
+			}
+			try {
+				const res = await searchEpisodes(kw);
+				renderAnimes(panelEls.body, res.animes, onSelectEpisode);
+			} catch (err) {
+				panelEls.body.innerHTML = `<div class="cd2-dm-status">搜索失败: ${(err as Error).message}</div>`;
+			}
+			return;
+		}
+
+		// 直连模式 或 自动模式
 		try {
-			const res = await searchEpisodes(kw);
-			renderAnimes(panelEls.body, res.animes, onSelectEpisode);
-		} catch (err) {
-			panelEls.body.innerHTML = `<div class="cd2-dm-status">搜索失败: ${(err as Error).message}</div>`;
+			const res = await directSearchEpisodes(kw);
+			renderAnimes(panelEls.body, res.animes, (id, label) => onSelectEpisode(id, label, true));
+		} catch (directErr) {
+			if (searchMode === "direct") {
+				panelEls.body.innerHTML = `<div class="cd2-dm-status">直连搜索失败: ${(directErr as Error).message}</div>`;
+				return;
+			}
+			// auto模式回退到API
+			console.warn("[cd2-artplayer] 直连搜索失败，尝试API:", (directErr as Error).message);
+			if (hasApiUrl()) {
+				try {
+					const res = await searchEpisodes(kw);
+					renderAnimes(panelEls.body, res.animes, onSelectEpisode);
+				} catch (apiErr) {
+					panelEls.body.innerHTML = `<div class="cd2-dm-status">搜索失败: ${(apiErr as Error).message}</div>`;
+				}
+			} else {
+				panelEls.body.innerHTML = `<div class="cd2-dm-status">搜索失败: ${(directErr as Error).message}</div>`;
+			}
 		}
 	};
 	panelEls.searchBtn.onclick = doSearch;
@@ -416,30 +478,144 @@ export async function openPlayer(
 	});
 }
 
-// ─── 自动匹配弹幕（多策略）─────────────────────────────
+// ─── 自动匹配弹幕（多策略，直连优先/API后备）────────────
 
 async function autoMatch(
 	fileName: string,
 	panelEls: ReturnType<typeof createDanmakuPanel>,
-	onSelect: (id: number, label: string) => void,
+	onSelect: (id: number, label: string, useDirect?: boolean) => void,
 	setStatus: (text: string) => void,
 ) {
 	const keyword = extractKeyword(fileName);
 	if (keyword) panelEls.input.value = keyword;
 
+	const mode = getDanmuMode();
+	console.log(`[cd2-artplayer] 当前弹幕模式: ${mode} (${getDanmuModeLabel(mode)})`);
+
+	// ══════════════════════════════════════════════════
+	// 阶段1：直连弹弹Play代理（mode=auto 或 mode=direct 时执行）
+	// ══════════════════════════════════════════════════
+	if (mode !== "api") {
+	try {
+		console.log("[cd2-artplayer] ═══ 阶段1: 直连弹弹Play代理 ═══");
+
+		// ── 直连策略1: 文件名匹配 ──
+		console.log("[cd2-artplayer] 直连策略1: 文件名匹配, fileName=", fileName);
+		setStatus("直连匹配中...");
+		const directMatchResult = await directMatchVideo(fileName);
+
+		if (directMatchResult.isMatched && directMatchResult.matches.length > 0) {
+			const match = directMatchResult.matches[0];
+			renderMatches(
+				panelEls.body,
+				directMatchResult.matches,
+				(id, label) => onSelect(id, label, true),
+				match.episodeId,
+			);
+			await onSelect(
+				match.episodeId,
+				`${match.animeTitle} - ${match.episodeTitle}`,
+				true,
+			);
+			return;
+		}
+
+		// ── 直连策略2: 关键词搜索 ──
+		if (keyword) {
+			console.log("[cd2-artplayer] 直连策略2: 关键词搜索, keyword=", keyword);
+			setStatus("直连搜索中...");
+			const directSearchResult = await directSearchEpisodes(keyword);
+
+			if (directSearchResult.animes.length > 0) {
+				renderAnimes(panelEls.body, directSearchResult.animes, (id, label) => onSelect(id, label, true));
+
+				const best = findBestEpisode(fileName, directSearchResult.animes);
+				if (best) {
+					await onSelect(
+						best.episodeId,
+						`${best.animeTitle} - ${best.episodeTitle}`,
+						true,
+					);
+					return;
+				}
+
+				setStatus(`直连找到 ${directSearchResult.animes.length} 部番剧，点击选集`);
+				if (currentPlayer)
+					currentPlayer.notice.show = "已搜索到番剧(直连)，请点击弹幕按钮选择集数";
+				return;
+			}
+
+			// ── 直连策略3: 缩短关键词再搜 ──
+			const shortKeyword = keyword.split(" ").slice(0, 2).join(" ");
+			if (shortKeyword !== keyword && shortKeyword.length >= 2) {
+				console.log(
+					"[cd2-artplayer] 直连策略3: 缩短关键词搜索, keyword=",
+					shortKeyword,
+				);
+				panelEls.input.value = shortKeyword;
+				const directRetryResult = await directSearchEpisodes(shortKeyword);
+				if (directRetryResult.animes.length > 0) {
+					renderAnimes(panelEls.body, directRetryResult.animes, (id, label) => onSelect(id, label, true));
+					const best = findBestEpisode(fileName, directRetryResult.animes);
+					if (best) {
+						await onSelect(
+							best.episodeId,
+							`${best.animeTitle} - ${best.episodeTitle}`,
+							true,
+						);
+						return;
+					}
+					setStatus(`直连找到 ${directRetryResult.animes.length} 部番剧，点击选集`);
+					if (currentPlayer)
+						currentPlayer.notice.show = "已搜索到番剧(直连)，请点击弹幕按钮选择集数";
+					return;
+				}
+			}
+		}
+
+		console.log("[cd2-artplayer] 直连弹弹Play代理未匹配到结果");
+	} catch (err) {
+		console.warn("[cd2-artplayer] 直连弹弹Play代理失败:", (err as Error).message);
+		if (mode === "direct") {
+			// 仅直连模式，不回退
+			setStatus("直连匹配失败，点击搜索");
+			panelEls.body.innerHTML =
+				'<div class="cd2-dm-status">直连匹配失败<br><br>可手动输入番剧名搜索<br>或切换到「自动」模式以启用API后备</div>';
+			if (currentPlayer)
+				currentPlayer.notice.show = "直连匹配失败，可点击弹幕按钮手动搜索";
+			return;
+		}
+	}
+
+	// 仅直连模式且未匹配到
+	if (mode === "direct") {
+		setStatus("未找到弹幕，点击搜索");
+		panelEls.body.innerHTML =
+			'<div class="cd2-dm-status">直连未匹配到结果<br><br>可手动输入番剧名搜索<br>或切换到「自动」模式以启用API后备</div>';
+		if (currentPlayer)
+			currentPlayer.notice.show = "未自动匹配到弹幕，可点击弹幕按钮手动搜索";
+		return;
+	}
+	} // end if (mode !== "api")
+
+	// ══════════════════════════════════════════════════
+	// 阶段2：danmu_api 服务（mode=auto回退 或 mode=api直接使用）
+	// ══════════════════════════════════════════════════
 	if (!hasApiUrl()) {
 		setStatus("需配置API地址");
 		panelEls.body.innerHTML =
-			'<div class="cd2-dm-status">请先通过油猴菜单「⚙ 弹幕 API 配置」设置弹幕 API 地址<br><br>支持自部署的 danmu_api 服务<br>项目地址：github.com/huangxd-/danmu_api</div>';
+			'<div class="cd2-dm-status">未配置弹幕 API 地址<br><br>请通过油猴菜单「⚙ 弹幕 API 配置」设置<br>或切换到「直连」/「自动」模式</div>';
 		if (currentPlayer)
-			currentPlayer.notice.show =
-				"弹幕功能需配置 API 地址，请在油猴菜单中设置";
+			currentPlayer.notice.show = "需配置弹幕 API 地址，或切换弹幕模式";
 		return;
 	}
 
 	try {
-		// ── 策略1: 直接用完整文件名匹配  ──
-		console.log("[cd2-artplayer] 策略1: 文件名匹配, fileName=", fileName);
+		console.log("[cd2-artplayer] ═══ 阶段2: 回退到 danmu_api 服务 ═══");
+
+		// ── API策略1: 文件名匹配 ──
+		console.log("[cd2-artplayer] API策略1: 文件名匹配, fileName=", fileName);
+		setStatus("API匹配中...");
 		const matchResult = await matchVideo(fileName);
 
 		if (matchResult.isMatched && matchResult.matches.length > 0) {
@@ -457,16 +633,16 @@ async function autoMatch(
 			return;
 		}
 
-		// ── 策略2: 用提取的关键词搜索  ──
+		// ── API策略2: 关键词搜索 ──
 		if (keyword) {
-			console.log("[cd2-artplayer] 策略2: 关键词搜索, keyword=", keyword);
-			setStatus("搜索中...");
+			console.log("[cd2-artplayer] API策略2: 关键词搜索, keyword=", keyword);
+			setStatus("API搜索中...");
+			panelEls.input.value = keyword;
 			const searchResult = await searchEpisodes(keyword);
 
 			if (searchResult.animes.length > 0) {
 				renderAnimes(panelEls.body, searchResult.animes, onSelect);
 
-				// 尝试自动选中最佳集数
 				const best = findBestEpisode(fileName, searchResult.animes);
 				if (best) {
 					await onSelect(
@@ -476,18 +652,17 @@ async function autoMatch(
 					return;
 				}
 
-				// 有结果但无法确定集数，提示用户选择
 				setStatus(`找到 ${searchResult.animes.length} 部番剧，点击选集`);
 				if (currentPlayer)
-					currentPlayer.notice.show = "已搜索到番剧，请点击弹幕按钮选择集数";
+					currentPlayer.notice.show = "已搜索到番剧(API)，请点击弹幕按钮选择集数";
 				return;
 			}
 
-			// ── 策略3: 缩短关键词再搜  ──
+			// ── API策略3: 缩短关键词再搜 ──
 			const shortKeyword = keyword.split(" ").slice(0, 2).join(" ");
 			if (shortKeyword !== keyword && shortKeyword.length >= 2) {
 				console.log(
-					"[cd2-artplayer] 策略3: 缩短关键词搜索, keyword=",
+					"[cd2-artplayer] API策略3: 缩短关键词搜索, keyword=",
 					shortKeyword,
 				);
 				panelEls.input.value = shortKeyword;
@@ -504,7 +679,7 @@ async function autoMatch(
 					}
 					setStatus(`找到 ${retryResult.animes.length} 部番剧，点击选集`);
 					if (currentPlayer)
-						currentPlayer.notice.show = "已搜索到番剧，请点击弹幕按钮选择集数";
+						currentPlayer.notice.show = "已搜索到番剧(API)，请点击弹幕按钮选择集数";
 					return;
 				}
 			}
@@ -517,35 +692,213 @@ async function autoMatch(
 		if (currentPlayer)
 			currentPlayer.notice.show = "未自动匹配到弹幕，可点击弹幕按钮手动搜索";
 	} catch (err) {
-		console.error("[cd2-artplayer] 自动匹配异常:", err);
+		console.error("[cd2-artplayer] API匹配异常:", err);
 		setStatus("匹配失败，点击搜索");
 		panelEls.body.innerHTML = `<div class="cd2-dm-status">匹配出错: ${(err as Error).message}</div>`;
 	}
 }
 
 // ─── 从文件名提取搜索关键词 ────────────────────────────
+// 针对 dmhy / 字幕组 / 动漫资源站命名规范优化
+//
+// 典型格式:
+//   [LoliHouse] 达尔文事变 / Darwin Jihen - 10 [WebRip 1080p ...].mkv
+//   [綠茶字幕組] 蘑菇魔女 / Champignon no Majo [09][WebRip]...
+//   【幻櫻字幕組】【1月新番】【黃金神威 Golden Kamuy】【59】...
+//   達爾文事變「ダーウィン事変」The Darwin Incident S01E10 1080p ...
+
+/** 检测字符串是否包含CJK字符 */
+function hasCJK(s: string): boolean {
+	return /[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/.test(s);
+}
 
 function extractKeyword(fileName: string): string {
-	const name = fileName
-		.replace(/\.[^.]+$/, "")
-		.replace(/[[\]【】()（）{}「」『』]/g, " ")
-		.replace(/\d{3,4}[xX×]\d{3,4}/g, "")
+	const title = extractTitle(fileName);
+	const season = extractSeasonNumber(fileName);
+	const episode = extractEpisodeNumber(fileName);
+
+	// 拼接: 番名 + S0XE0X 或 番名 + 0XX
+	let result = title;
+	if (season && episode) {
+		result += ` S${String(season).padStart(2, "0")}E${String(episode).padStart(2, "0")}`;
+	} else if (episode) {
+		result += ` ${String(episode).padStart(3, "0")}`;
+	}
+
+	console.log(`[cd2-artplayer] extractKeyword: "${fileName}" → "${result}"`);
+	return result;
+}
+
+/** 从 extractKeyword 的结果中剥离末尾的集数部分，仅保留番名（用于搜索API） */
+function extractSearchTitle(keyword: string): string {
+	return keyword
+		.replace(/\s+S\d+E\d+$/, "")
+		.replace(/\s+\d{2,3}$/, "")
+		.trim();
+}
+
+// ─── 提取番名（不含季集，符号去除适配模糊匹配） ──────────
+
+function extractTitle(fileName: string): string {
+	let name = fileName.replace(/\.[^.]+$/, ""); // 去扩展名
+
+	// ── ★ 分隔格式（如 `六四位元字幕組★番名★10★...`）──
+	if (name.includes("\u2605")) {
+		const starParts = name.split("\u2605").map((s) => s.trim()).filter(Boolean);
+		const titlePart = starParts.slice(1).find((p) => hasCJK(p) && !/^\d+$/.test(p) && !/1080|720|1920|AVC|AAC|MP4/i.test(p));
+		if (titlePart) {
+			name = titlePart.replace(/\s+[A-Z][a-z]+(?:\s+[a-z]+)*(?:\s+[A-Z][a-z]+)*\s*$/i, "").trim() || titlePart;
+			name = name.replace(/\s+\d{1,3}\s*$/, "").trim();
+			return cleanTitle(name);
+		}
+	}
+
+	// ── 【】包裹全部内容（如【幻櫻字幕組】【1月新番】【黃金神威 Golden Kamuy】【59】）──
+	const fullWidthTags = name.match(/【[^【】]*】/g);
+	if (fullWidthTags && fullWidthTags.length >= 3) {
+		const skipPatterns = /字幕|新番|月新|合集|GB|BIG5|MP4|MKV|1080|720|1920|1280|練習組|练习组/i;
+		for (const tag of fullWidthTags) {
+			const content = tag.slice(1, -1).trim();
+			if (hasCJK(content) && !skipPatterns.test(content) && !/^\d+$/.test(content)) {
+				name = content;
+				break;
+			}
+		}
+	}
+
+	// ── 嵌套【】下划线分隔（如 【...的孩子】_我推的孩子_Oshi no Ko】）──
+	if (name.includes("_") && hasCJK(name)) {
+		const parts = name.split("_").map((s) => s.trim()).filter(Boolean);
+		const cjkTitle = parts.find((p) => hasCJK(p) && !/字幕|练习|偶像/.test(p) && p.length >= 2);
+		if (cjkTitle) name = cjkTitle;
+	}
+
+	// ── 剥离开头连续的 [字幕组] / 【字幕组】 标签 ──
+	if (/^\s*[[\u3010]/.test(name)) {
+		name = name.replace(/^(\s*[[\u3010][^\]\u3011]*[\]\u3011]\s*)+/, "").trim();
+	}
+
+	// ── 去壳标题中的【】，保留内容 ──
+	name = name.replace(/【([^】]*)】/g, "$1").trim();
+
+	// ── 用 "/" 分隔提取番名，优先取CJK ──
+	if (name.includes("/")) {
+		const parts = name.split(/\s*\/\s*/);
+		const cjkPart = parts.find((p) => hasCJK(p.trim()));
+		name = cjkPart ? cjkPart.trim() : parts[0].trim();
+	}
+
+	// ── 截断集数及之后的内容 ──
+	name = name
+		.replace(/\s+-\s+\d+\b.*$/, "")
+		.replace(/\s*\[\d+(?:v\d+)?(?:\s*[-~]\s*\d+)?].*$/, "")
+		.replace(/\s+S\d+E\d+\b.*$/i, "")
+		.replace(/(」)\s*The\s+.*$/i, "$1")
+		.replace(/\s+\d{1,3}\s*$/, "")
+		.trim();
+
+	// ── 去除残留技术标记 ──
+	name = name
+		.replace(/[[\u3010][^\]\u3011]*[\]\u3011]/g, "")
+		.replace(/[(\uff08][^)\uff09]*[)\uff09]/g, "")
+		.replace(/\b\d{3,4}[xX\u00d7]\d{3,4}\b/g, "")
 		.replace(/\b(1080[pi]?|720[pi]?|480[pi]?|2160[pi]?|4K|UHD)\b/gi, "")
-		.replace(/\b(BluRay|BDRip|WEBRip|WEB-DL|DVDRip|HDTV|REMUX)\b/gi, "")
 		.replace(/\b(HEVC|AVC|H\.?264|H\.?265|x264|x265|10bit|Hi10P|HDR)\b/gi, "")
 		.replace(/\b(AAC|FLAC|DTS|AC3|MP3|OGG|OPUS|EAC3|TrueHD|Atmos)\b/gi, "")
-		.replace(/\b(MP4|MKV|AVI|RMVB|FLV|TS|WMV|MOV)\b/gi, "")
-		.replace(/\b(S\d+E\d+)\b/gi, "")
+		.replace(/\b(BluRay|BDRip|WEBRip|WEB-DL|DVDRip|HDTV|REMUX|WebRip|BILIBILI|CR|B-Global|ABEMA|Baha|ViuTV)\b/gi, "")
+		.replace(/\b(MP4|MKV|AVI|RMVB|FLV|TS|WMV|MOV|WAV)\b/gi, "")
+		.replace(/\b(CHS|CHT|JPN?|ENG?|GB|BIG5|YUE|PGS|SRT|OVA)\b/gi, "")
+		.replace(/(简繁|繁日|简日|简体|繁体|繁體|簡體|双语|雙語|粤语|粵語|中文|日语|日英|配音)/g, "")
+		.replace(/(字幕组?|字幕組?|翻译|翻譯|招募|内嵌|外挂|内封|內嵌|內封|外封|无字幕|多國字幕)/g, "")
+		.replace(/\u2605[^\u2605]*\u2605/g, "")
+		.replace(/\u2605/g, "")
 		.replace(/\bv\d+\b/gi, "")
-		.replace(/\b(CHS|CHT|JPN?|ENG?|GB|BIG5|繁体|简体|简日|繁日)\b/gi, "")
-		.replace(/字幕组?|翻译|内嵌|外挂|内封/g, "")
-		.replace(/[-_.]/g, " ")
+		.replace(/\bS\d+$/i, "")
+		.replace(/\s+-\s*$/, "")
+		.replace(/^\s*-\s+/, "")
 		.replace(/\s+/g, " ")
 		.trim();
 
-	// 去掉独立的纯数字和单字符
-	const words = name.split(" ").filter((w) => w.length > 1 && !/^\d+$/.test(w));
-	return words.slice(0, 3).join(" ");
+	// ── 截断CJK标题后的拉丁文罗马音 ──
+	if (hasCJK(name)) {
+		const cjkTruncated = name.replace(/\s+[A-Z][a-zA-Z]+(?:\s+[a-zA-Z]+)*\s*$/, "").trim();
+		if (cjkTruncated.length >= 2 && hasCJK(cjkTruncated)) {
+			name = cjkTruncated;
+		}
+	}
+
+	// ── 回退 ──
+	if (name.length < 2) {
+		const fallback = fileName
+			.replace(/\.[^.]+$/, "")
+			.replace(/[\u3010\u3011【】\[\]()（）{}「」『』\u2605]/g, " ")
+			.replace(/\b(1080[pi]?|720[pi]?)\\b/gi, "")
+			.replace(/[-_.]/g, " ")
+			.replace(/\s+/g, " ")
+			.trim();
+		const words = fallback.split(" ").filter((w) => w.length > 1 && !/^\d+$/.test(w));
+		name = words.slice(0, 4).join(" ");
+	}
+
+	return cleanTitle(name);
+}
+
+/** 去除符号适配模糊匹配: ～→空格, 「」→去除, 季数文字→去除(由S0X表示) */
+function cleanTitle(title: string): string {
+	return title
+		.replace(/[～~「」『』《》""'']/g, " ")
+		.replace(/第[一二三四五六七八九十百千\d]+季/g, "")
+		.replace(/\d+(st|nd|rd|th)\s*Season/gi, "")
+		.replace(/[-_.]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+// ─── 提取季数 ────────────────────────────────────────────
+
+function extractSeasonNumber(fileName: string): number | null {
+	const name = fileName.replace(/\.[^.]+$/, "");
+	const patterns: [RegExp, ((m: RegExpMatchArray) => number)?][] = [
+		[/第([一二三四五六七八九十])季/, (m) => "一二三四五六七八九十".indexOf(m[1]) + 1],
+		[/第(\d+)季/, (m) => parseInt(m[1])],
+		[/\bS(\d+)\s*E\d+/i],
+		[/\bS(\d+)\b(?!\d)/i],
+		[/(\d+)(?:st|nd|rd|th)\s*Season/i],
+	];
+	for (const [pat, transform] of patterns) {
+		const m = name.match(pat);
+		if (m) {
+			const num = transform ? transform(m) : parseInt(m[1]);
+			if (num > 0 && num < 30) return num;
+		}
+	}
+	return null;
+}
+
+// ─── 提取集数 ────────────────────────────────────────────
+
+function extractEpisodeNumber(fileName: string): number | null {
+	const name = fileName.replace(/\.[^.]+$/, "");
+	const patterns: RegExp[] = [
+		/第(\d+)[话話集期]/,
+		/\bEP?\s*(\d+)\b/i,
+		/\bS\d+E(\d+)\b/i,
+		/\u2605\s*(\d{1,3})\s*\u2605/,
+		/【(\d{1,3})】/,
+		/\[\s*(\d{1,3})\s*\]/,
+		/\s+-\s+(\d{1,3})\s/,
+		/\s+-\s+(\d{1,3})\s*$/,
+		/[\s_.-]\s*(\d{2,3})\s*[\s_.\-[\u3010(v]/,
+		/[\s_.-]\s*(\d{2,3})\s*$/,
+	];
+	for (const pat of patterns) {
+		const m = name.match(pat);
+		if (m) {
+			const num = parseInt(m[1]);
+			if (num > 0 && num < 999) return num;
+		}
+	}
+	return null;
 }
 
 // ─── 从文件名推断集数并匹配最佳结果 ───────────────────
@@ -554,14 +907,11 @@ function findBestEpisode(
 	fileName: string,
 	animes: SearchAnime[],
 ): { episodeId: number; animeTitle: string; episodeTitle: string } | null {
-	// 提取集数
 	const epNum = extractEpisodeNumber(fileName);
 	if (epNum === null) return null;
 
-	// 在第一个番剧中查找对应集数
 	for (const anime of animes) {
 		for (const ep of anime.episodes) {
-			// episodeTitle 通常为 "第1话"、"第01集" 或 "01" 或 "Episode 1"
 			const epTitle = ep.episodeTitle;
 			const nums = epTitle.match(/\d+/g);
 			if (nums) {
@@ -580,25 +930,7 @@ function findBestEpisode(
 	return null;
 }
 
-function extractEpisodeNumber(fileName: string): number | null {
-	const name = fileName.replace(/\.[^.]+$/, "");
 
-	// 匹配各种集数格式
-	const patterns = [
-		/第(\d+)[话話集期]/, // 第01话
-		/\bEP?\s*(\d+)\b/i, // EP01 / E01
-		/\bS\d+E(\d+)\b/i, // S01E01
-		/[\s_.-]\s*(\d{2,3})\s*[\s_.\-[【(v]/, // 空格/分隔符后的2-3位数字
-		/[\s_.-]\s*(\d{2,3})\s*$/, // 结尾的2-3位数字
-		/[[\s](\d{2})\s*[\]]/, // [01] 格式
-	];
 
-	for (const pat of patterns) {
-		const m = name.match(pat);
-		if (m) {
-			const num = parseInt(m[1]);
-			if (num > 0 && num < 2000) return num;
-		}
-	}
-	return null;
-}
+
+

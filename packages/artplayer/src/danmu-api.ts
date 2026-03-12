@@ -24,6 +24,11 @@ import {
 const CONFIG_KEY_API_URL = "danmu_api_url";
 const DEFAULT_API_URL = "https://clouddrive2.netlify.app/87076677";
 
+/** 弹弹Play公开代理地址（直连，无需认证） */
+const DANDANPLAY_PROXY = "https://api.danmaku.weeblify.app/ddp/v1";
+/** 直连请求超时（毫秒） */
+const DIRECT_TIMEOUT_MS = 8000;
+
 export function getApiUrl(): string {
 	return (GM_getValue(CONFIG_KEY_API_URL, DEFAULT_API_URL) as string).trim().replace(/\/+$/, "");
 }
@@ -34,6 +39,42 @@ export function setApiUrl(v: string) {
 
 export function hasApiUrl(): boolean {
 	return getApiUrl().length > 0;
+}
+
+// ─── 匹配模式 ───────────────────────────────────────────
+
+/** 弹幕匹配模式: auto=直连优先自动回退 | direct=仅直连 | api=仅API */
+export type DanmuMode = "auto" | "direct" | "api";
+
+const CONFIG_KEY_DANMU_MODE = "danmu_mode";
+
+const MODE_LABELS: Record<DanmuMode, string> = {
+	auto: "自动（直连优先）",
+	direct: "仅直连",
+	api: "仅API",
+};
+
+export function getDanmuMode(): DanmuMode {
+	const v = GM_getValue(CONFIG_KEY_DANMU_MODE, "auto") as string;
+	if (v === "direct" || v === "api") return v;
+	return "auto";
+}
+
+export function setDanmuMode(mode: DanmuMode) {
+	GM_setValue(CONFIG_KEY_DANMU_MODE, mode);
+}
+
+export function getDanmuModeLabel(mode?: DanmuMode): string {
+	return MODE_LABELS[mode ?? getDanmuMode()];
+}
+
+/** 循环切换到下一个模式 */
+export function cycleDanmuMode(): DanmuMode {
+	const order: DanmuMode[] = ["auto", "direct", "api"];
+	const cur = getDanmuMode();
+	const next = order[(order.indexOf(cur) + 1) % order.length];
+	setDanmuMode(next);
+	return next;
 }
 
 // ─── Types ──────────────────────────────────────────────
@@ -101,6 +142,7 @@ function gmFetch<T>(
 		method?: string;
 		body?: string;
 		headers?: Record<string, string>;
+		timeout?: number;
 	} = {},
 ): Promise<T> {
 	return new Promise((resolve, reject) => {
@@ -113,6 +155,7 @@ function gmFetch<T>(
 				...options.headers,
 			},
 			data: options.body,
+			timeout: options.timeout,
 			onload(res) {
 				if (res.status >= 200 && res.status < 300) {
 					try {
@@ -127,14 +170,19 @@ function gmFetch<T>(
 			onerror(err) {
 				reject(new Error(`网络错误: ${err.error || "unknown"}`));
 			},
+			ontimeout() {
+				reject(new Error("请求超时"));
+			},
 		});
 	});
 }
 
-// ─── API 方法 ───────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════
+// danmu_api 服务 API 方法（通过自部署服务，后备方案）
+// ═══════════════════════════════════════════════════════════
 
 /**
- * 通过文件名匹配番剧信息
+ * 通过文件名匹配番剧信息（danmu_api服务）
  */
 export async function matchVideo(fileName: string): Promise<MatchResult> {
 	const apiUrl = getApiUrl();
@@ -151,7 +199,7 @@ export async function matchVideo(fileName: string): Promise<MatchResult> {
 }
 
 /**
- * 通过关键词搜索剧集
+ * 通过关键词搜索剧集（danmu_api服务）
  */
 export async function searchEpisodes(
 	keyword: string,
@@ -163,7 +211,7 @@ export async function searchEpisodes(
 }
 
 /**
- * 获取指定 episodeId 的弹幕
+ * 获取指定 episodeId 的弹幕（danmu_api服务）
  * @param withRelated 是否包含第三方弹幕源
  */
 export async function fetchComments(
@@ -200,7 +248,7 @@ export function convertToArtDanmaku(comments: DanmakuComment[]): ArtDanmaku[] {
 }
 
 /**
- * 完整弹幕加载流程：匹配 → 获取弹幕 → 转换格式
+ * 完整弹幕加载流程：匹配 → 获取弹幕 → 转换格式（danmu_api服务）
  */
 export async function loadDanmaku(
 	fileName: string,
@@ -227,4 +275,64 @@ export async function loadDanmaku(
 		console.error("[cd2-artplayer] 弹幕加载失败:", err);
 		return null;
 	}
+}
+
+// ═══════════════════════════════════════════════════════════
+// 直连弹弹Play代理 API 方法（优先方案，无需自部署服务）
+// ═══════════════════════════════════════════════════════════
+
+/** 弹弹Play代理返回的包裹结构 */
+interface DandanProxyResponse<T> {
+	data: T;
+}
+
+/**
+ * 直连弹弹Play代理：通过文件名匹配番剧信息
+ */
+export async function directMatchVideo(fileName: string): Promise<MatchResult> {
+	const body = JSON.stringify({
+		fileName,
+		fileHash: "",
+		fileSize: 0,
+		videoDuration: 0,
+		matchMode: "hashAndFileName",
+	});
+	// 弹弹Play match 是 POST 接口，代理使用 path 参数
+	const resp = await gmFetch<MatchResult>(
+		`${DANDANPLAY_PROXY}?path=/v2/match`,
+		{
+			method: "POST",
+			body,
+			timeout: DIRECT_TIMEOUT_MS,
+		},
+	);
+	return resp;
+}
+
+/**
+ * 直连弹弹Play代理：通过关键词搜索剧集
+ */
+export async function directSearchEpisodes(
+	keyword: string,
+): Promise<SearchEpisodeResult> {
+	const resp = await gmFetch<SearchEpisodeResult>(
+		`${DANDANPLAY_PROXY}?path=/v2/search/episodes?anime=${encodeURIComponent(keyword)}`,
+		{ timeout: DIRECT_TIMEOUT_MS },
+	);
+	return resp;
+}
+
+/**
+ * 直连弹弹Play代理：获取指定 episodeId 的弹幕
+ */
+export async function directFetchComments(
+	episodeId: number,
+	withRelated = true,
+): Promise<CommentResponse> {
+	const path = encodeURIComponent(`/v2/comment/${episodeId}?from=0&withRelated=${withRelated}&chConvert=0`);
+	const resp = await gmFetch<CommentResponse>(
+		`${DANDANPLAY_PROXY}?path=${path}`,
+		{ timeout: DIRECT_TIMEOUT_MS },
+	);
+	return resp;
 }
