@@ -177,6 +177,82 @@ function gmFetch<T>(
 	});
 }
 
+/** 
+ * 提供给 @cryguy/mkv-subtitle-extractor 等第三方库使用的标准 fetch 适配器
+ * 拦截请求交由 GM_xmlhttpRequest 处理以避开 CORS 限制，支持 ArrayBuffer 返回
+ */
+export function gmFetchAdapter(url: string | URL | Request, options?: RequestInit): Promise<Response> {
+	const targetUrl = typeof url === 'string' ? url : (url as URL).href || (url as Request).url;
+	return new Promise((resolve, reject) => {
+		// 转换传入的 headers (可能是 Headers 对象，或者是 Record)
+		const reqHeaders: Record<string, string> = {};
+		if (options?.headers) {
+			if (options.headers instanceof Headers) {
+				options.headers.forEach((value, key) => {
+					reqHeaders[key] = value;
+				});
+			} else {
+				Object.assign(reqHeaders, options.headers);
+			}
+		}
+
+		console.log(`[cd2-gmFetchAdapter] 发起请求: ${targetUrl}`, reqHeaders);
+
+		GM_xmlhttpRequest({
+			method: (options?.method || "GET") as any,
+			url: targetUrl,
+			headers: reqHeaders,
+			data: options?.body as any,
+			responseType: "arraybuffer",
+			onload(res) {
+				const responseHeaders = new Headers();
+				let hasContentRange = false;
+				let contentLength = -1;
+				
+				if (res.responseHeaders) {
+					// GM_xmlhttpRequest 的 responseHeaders 通常是 \r\n 分隔的纯文本
+					res.responseHeaders.split(/\r?\n/).forEach(line => {
+						if (!line.trim()) return;
+						const index = line.indexOf(":");
+						if (index > 0) {
+							const key = line.substring(0, index).trim();
+							const val = line.substring(index + 1).trim();
+							responseHeaders.append(key, val);
+							if (key.toLowerCase() === 'content-range') hasContentRange = true;
+							if (key.toLowerCase() === 'content-length') contentLength = parseInt(val, 10);
+						}
+					});
+				}
+
+				let buf = res.response as ArrayBuffer;
+				if (buf && contentLength !== -1 && buf.byteLength > contentLength) {
+					// 如果浏览器自动解压或读取了多余的 Buffer，强制截断
+					buf = buf.slice(0, contentLength);
+				}
+
+				console.log(`[cd2-gmFetchAdapter] 收到响应: ${res.status} byteLength=${buf ? buf.byteLength : 0} Content-Range=${hasContentRange}`);
+
+				// 重要：mkv-subtitle-extractor 严格要求 206 状态码才认为支持 Range
+				// 阿里云盘/网盘直链有时候返回 200 但其实带了 Content-Range，我们强制重置为 206
+				const status = (hasContentRange && res.status === 200) ? 206 : res.status;
+
+				const response = new Response(buf, {
+					status: status,
+					statusText: res.statusText,
+					headers: responseHeaders,
+				});
+				resolve(response);
+			},
+			onerror(err) {
+				reject(new Error(`Fetch error: ${err.error}`));
+			},
+			ontimeout() {
+				reject(new Error("Fetch timeout"));
+			}
+		});
+	});
+}
+
 // ═══════════════════════════════════════════════════════════
 // danmu_api 服务 API 方法（通过自部署服务，后备方案）
 // ═══════════════════════════════════════════════════════════
@@ -329,9 +405,8 @@ export async function directFetchComments(
 	episodeId: number,
 	withRelated = true,
 ): Promise<CommentResponse> {
-	const path = encodeURIComponent(`/v2/comment/${episodeId}?from=0&withRelated=${withRelated}&chConvert=0`);
 	const resp = await gmFetch<CommentResponse>(
-		`${DANDANPLAY_PROXY}?path=${path}`,
+		`${DANDANPLAY_PROXY}?path=/v2/comment/${episodeId}?from=0&withRelated=${withRelated}&chConvert=0`,
 		{ timeout: DIRECT_TIMEOUT_MS },
 	);
 	return resp;

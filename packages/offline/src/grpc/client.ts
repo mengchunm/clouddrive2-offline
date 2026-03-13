@@ -238,3 +238,5 @@ export function subscribePushMessage(onRefresh: () => void, signal: AbortSignal)
 
   connect();
 }
+
+// End of file

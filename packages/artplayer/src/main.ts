@@ -26,12 +26,27 @@ import { destroyPlayer, openPlayer } from "./player";
 
 // ─── 播放事件类型定义 ────────────────────────────────────
 
+export interface PlaylistItem {
+	fileName: string;
+	filePath: string;
+}
+
+export interface SubtitleFile {
+	fileName: string;
+	filePath: string;
+	url: string;
+}
+
 export interface PlayVideoDetail {
+	folderName?: string;
 	fileName: string;
 	filePath?: string;
 	videoUrl: string;
 	grpcBaseUrl?: string;
 	apiToken?: string;
+	playlist?: PlaylistItem[];
+	currentIndex?: number;
+	subtitles?: SubtitleFile[];
 }
 
 // ─── 事件监听 ────────────────────────────────────────────
@@ -45,7 +60,7 @@ function handlePlayVideo(e: CustomEvent<PlayVideoDetail>) {
 
 	console.log("[cd2-artplayer] 收到播放请求:", detail.fileName);
 
-	openPlayer(detail.videoUrl, detail.fileName).catch((err) => {
+	openPlayer(detail.videoUrl, detail.fileName, undefined, detail.playlist, detail.currentIndex, detail.folderName, detail.subtitles).catch((err) => {
 		console.error("[cd2-artplayer] 播放失败:", err);
 	});
 }

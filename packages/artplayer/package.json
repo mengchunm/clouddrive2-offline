@@ -18,8 +18,11 @@
 		"format": "biome format --write"
 	},
 	"dependencies": {
+		"@cryguy/mkv-subtitle-extractor": "^1.0.1",
 		"artplayer": "^5.3.0",
-		"artplayer-plugin-danmuku": "^5.2.0"
+		"artplayer-plugin-danmuku": "^5.2.0",
+		"artplayer-plugin-libass": "^1.0.0",
+		"mp4box": "^2.3.0"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.3.8",

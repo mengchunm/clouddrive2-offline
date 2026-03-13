@@ -14,6 +14,7 @@ import {
   subscribePushMessage,
 } from "@/grpc/client";
 import { OfflineFileStatus } from "@/proto/clouddrive_pb";
+import { playlistMemory } from "../../memory";
 import infuseImg from "../../../../../icon/infuse.png";
 import potplayerImg from "../../../../../icon/potplayer.png";
 import dandanplayImg from "../../../../../icon/弹弹play.png";
@@ -316,6 +317,9 @@ export function OfflineTasksTab() {
     };
   }, [fetchAllSilent]);
 
+  // 监听 artplayer 的 URL 解析请求（用于分集切换）
+
+
   // 是否有活跃（未完成）的离线任务
   const hasActiveTask = useMemo(
     () =>
@@ -539,6 +543,8 @@ export function OfflineTasksTab() {
 
     let largestMediaFile: typeof rootFile | undefined;
     let maxMediaSize = -1;
+    const allMedia: (typeof rootFile)[] = [];
+    let hasBDMV = false;
 
     const queue: { path: string; depth: number }[] = [{ path: rootFile.fullPathName, depth: 1 }];
     let queryCount = 0;
@@ -556,6 +562,7 @@ export function OfflineTasksTab() {
 
         for (const f of subFiles) {
           if (isMedia(f)) {
+            allMedia.push(f);
             const size = Number(f.size || 0);
             if (size > maxMediaSize) {
               maxMediaSize = size;
@@ -571,6 +578,10 @@ export function OfflineTasksTab() {
             const streamDir = subDirs.find((d) => d.name.toUpperCase() === "STREAM");
             const pUpper = path.toUpperCase();
             const isInsideBdmv = pUpper.endsWith("/BDMV") || pUpper.endsWith("\\BDMV");
+
+            if (bdmvDir || streamDir || isInsideBdmv) {
+              hasBDMV = true;
+            }
 
             if (bdmvDir) {
               queue.length = 0;
@@ -588,8 +599,170 @@ export function OfflineTasksTab() {
       }
     }
 
-    return largestMediaFile;
+    if (hasBDMV) {
+      return largestMediaFile;
+    } else {
+      if (allMedia.length === 0) return undefined;
+      allMedia.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+      const mem = playlistMemory.get(row.name);
+      if (mem && mem.filePath) {
+        const memObj = allMedia.find((f) => f.fullPathName === mem.filePath);
+        if (memObj) return memObj;
+      }
+      return allMedia[0];
+    }
   }, []);
+
+  /** 扫描文件夹内所有媒体文件，返回播放列表 */
+  const resolvePlaylist = useCallback(async (row: Row): Promise<{ fileName: string; filePath: string }[]> => {
+    const cfg = getConfig();
+    const parentPath = cfg.offlineDestPath || "/";
+    const rootFile = await findFileByPath(parentPath, row.name);
+    if (!rootFile?.isDirectory) return [];
+
+    const mediaExts = [".mp4", ".mkv", ".avi", ".rmvb", ".mov", ".flv", ".ts", ".m2ts"];
+    const isMedia = (f: { name: string; isDirectory?: boolean }) =>
+      !f.isDirectory && mediaExts.some((ext) => f.name.toLowerCase().endsWith(ext));
+
+    const allMedia: { fileName: string; filePath: string }[] = [];
+    const queue: { path: string; depth: number }[] = [{ path: rootFile.fullPathName, depth: 1 }];
+    let queryCount = 0;
+    const MAX_DEPTH = 3;
+    const MAX_QUERIES = 20;
+
+    while (queue.length > 0 && queryCount < MAX_QUERIES) {
+      const item = queue.shift();
+      if (!item) break;
+      const { path, depth } = item;
+      queryCount++;
+      try {
+        const subFiles = await listSubFiles(path);
+        for (const f of subFiles) {
+          if (isMedia(f)) allMedia.push({ fileName: f.name, filePath: f.fullPathName });
+        }
+        if (depth < MAX_DEPTH) {
+          const subDirs = subFiles.filter((f) => f.isDirectory);
+          for (const d of subDirs) queue.push({ path: d.fullPathName, depth: depth + 1 });
+        }
+      } catch (e) {
+        console.warn(`[cd2] resolvePlaylist scan failed for ${path}`, e);
+      }
+    }
+
+    return allMedia.sort((a, b) => a.fileName.localeCompare(b.fileName, undefined, { numeric: true, sensitivity: 'base' }));
+  }, []);
+
+  /** 扫描视频文件所在目录的字幕文件 */
+  const resolveSubtitles = useCallback(async (videoFilePath: string): Promise<{ fileName: string; filePath: string }[]> => {
+    const subtitleExts = [".srt", ".ass", ".ssa", ".vtt"];
+    const isSubtitle = (f: { name: string; isDirectory?: boolean }) =>
+      !f.isDirectory && subtitleExts.some((ext) => f.name.toLowerCase().endsWith(ext));
+
+    // 获取视频文件所在目录路径
+    const lastSlash = Math.max(videoFilePath.lastIndexOf("/"), videoFilePath.lastIndexOf("\\"));
+    if (lastSlash < 0) return [];
+    const parentDir = videoFilePath.substring(0, lastSlash);
+
+    try {
+      const files = await listSubFiles(parentDir);
+      return files
+        .filter(isSubtitle)
+        .map((f) => ({ fileName: f.name, filePath: f.fullPathName }))
+        .sort((a, b) => a.fileName.localeCompare(b.fileName, undefined, { numeric: true, sensitivity: 'base' }));
+    } catch (e) {
+      console.warn(`[cd2] resolveSubtitles scan failed for ${parentDir}`, e);
+      return [];
+    }
+  }, []);
+
+  /** 将 downloadUrlPath 转为完整 URL */
+  const buildVideoUrl = useCallback((urlInfo: { downloadUrlPath?: string; directUrl?: string }): string => {
+    const cfg = getConfig();
+    if (urlInfo.downloadUrlPath) {
+      let p = urlInfo.downloadUrlPath;
+      let u: URL;
+      try {
+        u = new URL(cfg.grpcBaseUrl || window.location.origin);
+      } catch {
+        u = new URL(window.location.origin);
+      }
+      p = p.replace(/(\{SCHEME\}|%7BSCHEME%7D)/gi, u.protocol.replace(":", ""));
+      p = p.replace(/(\{HOST\}|%7BHOST%7D)/gi, u.host);
+      if (p.startsWith("http//")) p = p.replace("http//", "http://");
+      if (p.startsWith("https//")) p = p.replace("https//", "https://");
+      if (p.startsWith("http://") || p.startsWith("https://")) return p;
+      const baseUrl = cfg.grpcBaseUrl.replace(/\/$/, "");
+      p = p.startsWith("/") ? p : `/${p}`;
+      return `${baseUrl}${p}`;
+    }
+    return urlInfo.directUrl || "";
+  }, []);
+
+  // 监听来自 artplayer 的分集 URL 解析请求
+  useEffect(() => {
+    const onResolveVideoUrl = async (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (!detail || !detail.filePath || !detail.requestId) return;
+
+      const realWindow = (typeof unsafeWindow !== "undefined" ? unsafeWindow : window) as Window;
+      try {
+        const urlInfo = await getDownloadUrlPath(detail.filePath, true);
+        const videoUrl = buildVideoUrl(urlInfo);
+        realWindow.dispatchEvent(
+          new CustomEvent("cd2-video-url-resolved", {
+            detail: { requestId: detail.requestId, videoUrl },
+          })
+        );
+      } catch (err) {
+        realWindow.dispatchEvent(
+          new CustomEvent("cd2-video-url-resolved", {
+            detail: { requestId: detail.requestId, error: (err as Error).message },
+          })
+        );
+      }
+    };
+
+    // 监听来自 artplayer 的字幕文件请求（分集切换时）
+    const onResolveSubtitles = async (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (!detail || !detail.filePath || !detail.requestId) return;
+
+      const realWindow2 = (typeof unsafeWindow !== "undefined" ? unsafeWindow : window) as Window;
+      try {
+        const subs = await resolveSubtitles(detail.filePath);
+        // 为每个字幕文件获取 URL
+        const subsWithUrl = await Promise.all(
+          subs.map(async (s) => {
+            try {
+              const urlInfo = await getDownloadUrlPath(s.filePath, true);
+              return { fileName: s.fileName, filePath: s.filePath, url: buildVideoUrl(urlInfo) };
+            } catch {
+              return null;
+            }
+          })
+        );
+        realWindow2.dispatchEvent(
+          new CustomEvent("cd2-subtitles-resolved", {
+            detail: { requestId: detail.requestId, subtitles: subsWithUrl.filter(Boolean) },
+          })
+        );
+      } catch (err) {
+        realWindow2.dispatchEvent(
+          new CustomEvent("cd2-subtitles-resolved", {
+            detail: { requestId: detail.requestId, subtitles: [], error: (err as Error).message },
+          })
+        );
+      }
+    };
+
+    const realWindow = (typeof unsafeWindow !== "undefined" ? unsafeWindow : window) as Window;
+    realWindow.addEventListener("cd2-resolve-video-url", onResolveVideoUrl);
+    realWindow.addEventListener("cd2-resolve-subtitles", onResolveSubtitles);
+    return () => {
+      realWindow.removeEventListener("cd2-resolve-video-url", onResolveVideoUrl);
+      realWindow.removeEventListener("cd2-resolve-subtitles", onResolveSubtitles);
+    };
+  }, [buildVideoUrl, resolveSubtitles]);
 
   /** 播放：支持网页端和本地外部播放器串流 */
   const playFile = useCallback(
@@ -614,32 +787,7 @@ export function OfflineTasksTab() {
         // 如果是外部播放器，也必须启用 preview = true。
         // 因为 preview = false 返回的直链会锁定单线程附加下载模式，导致 PotPlayer 分片请求时触发“文件不存在或被锁定”。
         const urlInfo = await getDownloadUrlPath(file.fullPathName, true);
-
-        let videoUrl = "";
-        if (urlInfo.downloadUrlPath) {
-          let p = urlInfo.downloadUrlPath;
-          let u: URL;
-          try {
-            u = new URL(cfg.grpcBaseUrl || window.location.origin);
-          } catch {
-            u = new URL(window.location.origin);
-          }
-          p = p.replace(/(\{SCHEME\}|%7BSCHEME%7D)/gi, u.protocol.replace(":", ""));
-          p = p.replace(/(\{HOST\}|%7BHOST%7D)/gi, u.host);
-
-          if (p.startsWith("http//")) p = p.replace("http//", "http://");
-          if (p.startsWith("https//")) p = p.replace("https//", "https://");
-
-          if (p.startsWith("http://") || p.startsWith("https://")) {
-            videoUrl = p;
-          } else {
-            const baseUrl = cfg.grpcBaseUrl.replace(/\/$/, "");
-            p = p.startsWith("/") ? p : `/${p}`;
-            videoUrl = `${baseUrl}${p}`;
-          }
-        } else if (urlInfo.directUrl) {
-          videoUrl = urlInfo.directUrl;
-        }
+        const videoUrl = buildVideoUrl(urlInfo);
 
         if (!videoUrl) {
           message.error("获取播放地址失败");
@@ -653,14 +801,37 @@ export function OfflineTasksTab() {
           };
 
           if (realWindow.__cd2ArtplayerReady) {
+            // 扫描文件夹构建播放列表和字幕列表
+            const [playlist, subtitles] = await Promise.all([
+              resolvePlaylist(row),
+              resolveSubtitles(file.fullPathName),
+            ]);
+            const currentIndex = playlist.findIndex((p) => p.filePath === file.fullPathName);
+
+            // 为字幕文件获取 URL
+            const subsWithUrl = await Promise.all(
+              subtitles.map(async (s) => {
+                try {
+                  const urlInfo = await getDownloadUrlPath(s.filePath, true);
+                  return { fileName: s.fileName, filePath: s.filePath, url: buildVideoUrl(urlInfo) };
+                } catch {
+                  return null;
+                }
+              })
+            );
+
             realWindow.dispatchEvent(
               new CustomEvent("cd2-play-video", {
                 detail: {
+                  folderName: row.name,
                   fileName: file.name,
                   filePath: file.fullPathName,
                   videoUrl,
                   grpcBaseUrl: cfg.grpcBaseUrl,
                   apiToken: cfg.apiToken,
+                  playlist: playlist.length > 1 ? playlist : undefined,
+                  currentIndex: playlist.length > 1 ? (currentIndex >= 0 ? currentIndex : 0) : undefined,
+                  subtitles: subsWithUrl.filter(Boolean),
                 },
               }),
             );
@@ -711,7 +882,7 @@ export function OfflineTasksTab() {
         hide();
       }
     },
-    [message, resolveTargetFile],
+    [message, resolveTargetFile, buildVideoUrl, resolvePlaylist],
   );
 
   /** 下载：preview=false，走附件下载模式 */

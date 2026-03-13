@@ -20,10 +20,44 @@ import {
 	matchVideo,
 	type SearchAnime,
 	searchEpisodes,
+	gmFetchAdapter,
 } from "./danmu-api";
+
+import artplayerPluginAss from "artplayer-plugin-libass";
+import { extractSubtitles, type TrackResult } from "@cryguy/mkv-subtitle-extractor";
+import { videoMemory, playlistMemory } from "./memory";
+import { extractMp4Subtitle } from "./utils/mp4Parser";
+
+// ─── 共享状态与常量 ──────────────────────────────────────────
 
 let currentPlayer: Artplayer | null = null;
 let overlayEl: HTMLDivElement | null = null;
+let _saveProgressBeforeDestroy: (() => void) | null = null;
+let _cleanupBeforeDestroy: (() => void) | null = null;
+
+const Win = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
+
+/** libass-wasm CDN 资源路径 */
+const LIBASS_CDN_BASE = "https://fastly.jsdelivr.net/npm/libass-wasm@4.1.0/dist";
+const LIBASS_WORKER_SCRIPT_URL = `${LIBASS_CDN_BASE}/js/subtitles-octopus-worker.js`;
+const LIBASS_WASM_URL = `${LIBASS_CDN_BASE}/js/subtitles-octopus-worker.wasm`;
+const LIBASS_FALLBACK_FONT = `${LIBASS_CDN_BASE}/fonts/Arial.ttf`;
+
+const SUBTITLE_ICON = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M4 6H20C21.1 6 22 6.9 22 8V16C22 17.1 21.1 18 20 18H4C2.9 18 2 17.1 2 16V8C2 6.9 2.9 6 4 6ZM4 16H20V8H4V16ZM7 11H9V13H7V11ZM11 11H17V13H11V11Z" fill="currentColor"/></svg>';
+
+export interface SubtitleItem {
+	url: string;
+	fileName: string;
+	isLocal?: boolean; // 如果是外挂字幕则为 true
+	ext?: string;
+	mkvTrackId?: number; // MKV 轨道 ID
+	isDeferred?: boolean; // 是否是延迟加载（内嵌字幕）
+}
+
+let _currentSubtitles: SubtitleItem[] = [];
+let _mkvExtractedSubs: SubtitleItem[] = [];
+let _mkvExtractedFonts: string[] = []; // 存储字体的 Blob URL
+const _blobUrlExtCache = new Map<string, string>();
 
 const CONTAINER_ID = "cd2-artplayer-container";
 const OVERLAY_ID = "cd2-artplayer-overlay";
@@ -208,11 +242,9 @@ function renderMatches(
 		g.innerHTML = `<div class="cd2-dm-group-title">${title}</div>`;
 		for (const item of items) {
 			const el = document.createElement("div");
-			el.className =
-				"cd2-dm-ep" + (item.episodeId === activeId ? " cd2-active" : "");
+			el.className = "cd2-dm-ep" + (item.episodeId === activeId ? " cd2-active" : "");
 			el.textContent = item.episodeTitle;
-			el.onclick = () =>
-				onSelect(item.episodeId, `${item.animeTitle} - ${item.episodeTitle}`);
+			el.onclick = () => onSelect(item.episodeId, item.episodeTitle);
 			g.appendChild(el);
 		}
 		body.appendChild(g);
@@ -223,6 +255,7 @@ function renderAnimes(
 	body: HTMLDivElement,
 	animes: SearchAnime[],
 	onSelect: (id: number, label: string) => void,
+	activeId?: number,
 ) {
 	body.innerHTML = "";
 	if (animes.length === 0) {
@@ -236,10 +269,9 @@ function renderAnimes(
 		g.innerHTML = `<div class="cd2-dm-group-title">${anime.animeTitle}（${anime.typeDescription}）</div>`;
 		for (const ep of anime.episodes) {
 			const el = document.createElement("div");
-			el.className = "cd2-dm-ep";
+			el.className = "cd2-dm-ep" + (ep.episodeId === activeId ? " cd2-active" : "");
 			el.textContent = ep.episodeTitle;
-			el.onclick = () =>
-				onSelect(ep.episodeId, `${anime.animeTitle} - ${ep.episodeTitle}`);
+			el.onclick = () => onSelect(ep.episodeId, ep.episodeTitle);
 			g.appendChild(el);
 		}
 		body.appendChild(g);
@@ -298,6 +330,14 @@ function createOverlay(title: string) {
 // ─── 销毁 ───────────────────────────────────────────────
 
 export function destroyPlayer() {
+	if (_saveProgressBeforeDestroy) {
+		_saveProgressBeforeDestroy();
+		_saveProgressBeforeDestroy = null;
+	}
+	if (_cleanupBeforeDestroy) {
+		_cleanupBeforeDestroy();
+		_cleanupBeforeDestroy = null;
+	}
 	if (currentPlayer) {
 		currentPlayer.destroy(true);
 		currentPlayer = null;
@@ -330,6 +370,10 @@ export async function openPlayer(
 	url: string,
 	fileName: string,
 	title?: string,
+	playlist?: { fileName: string; filePath: string }[],
+	currentIndex?: number,
+	folderName?: string,
+	subtitles?: SubtitleItem[],
 ) {
 	const displayTitle = title || fileName;
 	const { container, panelEls } = createOverlay(displayTitle);
@@ -337,11 +381,15 @@ export async function openPlayer(
 	// 弹幕状态文字（显示在控制栏）
 	let danmakuStatusText = "弹幕匹配中...";
 	let _currentEpisodeId: number | undefined;
+	// 保存最后一次搜索/匹配的结果，用于选集后刷新面板高亮
+	let _lastAnimes: SearchAnime[] = [];
+	let _lastUseDirect = false;
 
 	// 选集回调
 	// useDirect: true=使用直连弹弹Play代理, false=使用danmu_api服务
 	const onSelectEpisode = async (episodeId: number, label: string, useDirect = false) => {
 		_currentEpisodeId = episodeId;
+		_lastUseDirect = useDirect;
 		panelEls.hide();
 		danmakuStatusText = "加载中...";
 		updateControlText();
@@ -356,6 +404,13 @@ export async function openPlayer(
 			updateControlText();
 			if (currentPlayer)
 				currentPlayer.notice.show = `已加载 ${danmaku.length} 条弹幕(${source})`;
+			// 更新面板列表高亮
+			if (_lastAnimes.length > 0) {
+				const selectFn = useDirect
+					? (id: number, lbl: string) => onSelectEpisode(id, lbl, true)
+					: (id: number, lbl: string) => onSelectEpisode(id, lbl, false);
+				renderAnimes(panelEls.body, _lastAnimes, selectFn, episodeId);
+			}
 		} catch (err) {
 			danmakuStatusText = "加载失败";
 			updateControlText();
@@ -379,7 +434,7 @@ export async function openPlayer(
 			}
 			try {
 				const res = await searchEpisodes(kw);
-				renderAnimes(panelEls.body, res.animes, onSelectEpisode);
+				renderAnimes(panelEls.body, res.animes, onSelectEpisode, _currentEpisodeId);
 			} catch (err) {
 				panelEls.body.innerHTML = `<div class="cd2-dm-status">搜索失败: ${(err as Error).message}</div>`;
 			}
@@ -389,7 +444,7 @@ export async function openPlayer(
 		// 直连模式 或 自动模式
 		try {
 			const res = await directSearchEpisodes(kw);
-			renderAnimes(panelEls.body, res.animes, (id, label) => onSelectEpisode(id, label, true));
+			renderAnimes(panelEls.body, res.animes, (id, label) => onSelectEpisode(id, label, true), _currentEpisodeId);
 		} catch (directErr) {
 			if (searchMode === "direct") {
 				panelEls.body.innerHTML = `<div class="cd2-dm-status">直连搜索失败: ${(directErr as Error).message}</div>`;
@@ -420,7 +475,129 @@ export async function openPlayer(
 		if (el) el.textContent = danmakuStatusText;
 	}
 
+	// 构建控制栏
+	const controls: Artplayer["option"]["controls"] = [
+		{
+			name: "subtitle-selector",
+			position: "right",
+			index: 10,
+			html: `<div style="display:flex;align-items:center;gap:4px;padding:0 6px;cursor:pointer" title="字幕切换">${SUBTITLE_ICON}</div>`,
+			selector: [{ default: true, html: "关闭字幕", url: "" }],
+			onSelect: (item) => {
+				if (currentPlayer) {
+					if (!item.url && !item.mkvTrackId) {
+						// 用户选择了“关闭字幕”
+						const assPlugin = currentPlayer.plugins.artplayerPluginAss as any;
+						if (assPlugin) assPlugin.hide();
+						currentPlayer.subtitle.show = false;
+						const tracks = currentPlayer.video.textTracks;
+						for (let i = 0; i < tracks.length; i++) tracks[i].mode = "hidden";
+						return "关闭字幕";
+					}
+
+					const apply = (url: string) => {
+						if (!currentPlayer) return;
+						if (item.ext === "ass" || item.ext === "ssa") {
+							currentPlayer.subtitle.show = false;
+							safeSwitchAss(currentPlayer, url);
+						} else if (item.isNativeType) {
+							currentPlayer.subtitle.show = false;
+							const tracks = currentPlayer.video.textTracks;
+							for (let i = 0; i < tracks.length; i++) {
+								const t = tracks[i];
+								t.mode = (t.label === item.html) ? "showing" : "hidden";
+							}
+						} else {
+							const assPlugin = currentPlayer.plugins.artplayerPluginAss as any;
+							if (assPlugin) assPlugin.hide();
+							currentPlayer.subtitle.switch(url, { type: item.ext });
+							currentPlayer.subtitle.show = true;
+						}
+					};
+
+					if (item.isDeferred && !item.url) {
+						loadDeferredSubtitle(item).then(url => {
+							if (url) apply(url);
+						});
+						return item.html + " (提取中...)";
+					} else {
+						apply(item.url);
+						return item.html;
+					}
+				}
+				return item.html;
+			},
+		},
+		{
+			name: "danmaku-search",
+			position: "right",
+			index: 15,
+			html: `<div style="display:flex;align-items:center;gap:4px;padding:0 6px;cursor:pointer">${DANMAKU_ICON}<span class="cd2-dm-ctrl-text" style="font-size:12px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">弹幕匹配中...</span></div>`,
+			click: () => panelEls.toggle(),
+		},
+	];
+
+	if (playlist && playlist.length > 1) {
+		controls.push({
+			name: "playlist",
+			position: "right",
+			index: 20,
+			html: `<div style="display:flex;align-items:center;gap:4px;padding:0 6px;cursor:pointer" title="选集">选集</div>`,
+			selector: playlist.map((item, idx) => ({
+				html: item.fileName,
+				default: idx === currentIndex,
+				filePath: item.filePath,
+			})),
+			onSelect: (item) => {
+				Win.dispatchEvent(
+					new CustomEvent("cd2-play-video", {
+						detail: { targetPath: item.filePath },
+					}),
+				);
+				return item.html;
+			},
+		});
+	}
+
+	// 提前记录本次播放路径
+	if (folderName && playlist && currentIndex !== undefined) {
+		const currentItem = playlist[currentIndex];
+		if (currentItem) {
+			playlistMemory.set(folderName, { filePath: currentItem.filePath });
+		}
+	}
+
 	// 初始化播放器
+	// 为了让 Artplayer 初始化字幕引擎，我们喂给它一条空内容的 DataURI SRT 数据。
+	const initSubtitle = {
+		url: `data:text/plain;charset=utf-8,${encodeURIComponent("1\n00:00:00,000 --> 00:00:01,000\n ")}`,
+		type: "srt",
+		encoding: "utf-8",
+		escaping: false,
+	};
+
+	// Monkey-patch getExt：让 Artplayer/libass 能识别 Blob URL 的字幕扩展名
+	// getExt 是只读属性（只有 getter），需要用 Object.defineProperty 才能覆盖
+	const _originalGetExtDescriptor = Object.getOwnPropertyDescriptor(Artplayer.utils, "getExt");
+	const _originalGetExt = Artplayer.utils.getExt;
+	try {
+		Object.defineProperty(Artplayer.utils, "getExt", {
+			configurable: true,
+			writable: true,
+			value: (extUrl: string) => {
+				if (_blobUrlExtCache.has(extUrl)) return _blobUrlExtCache.get(extUrl)!;
+				const subItem = [..._currentSubtitles, ..._mkvExtractedSubs].find((s) => s.url === extUrl);
+				if (subItem) {
+					const ext = getSubtitleType(subItem.fileName);
+					if (ext) return ext;
+				}
+				return _originalGetExt(extUrl);
+			},
+		});
+	} catch (e) {
+		console.warn("[cd2-artplayer] 无法 patch getExt，字幕扩展名识别可能不准确:", e);
+	}
+
 	currentPlayer = new Artplayer({
 		container,
 		url,
@@ -445,15 +622,8 @@ export async function openPlayer(
 		fastForward: true,
 		autoOrientation: true,
 		theme: "#1677ff",
-		controls: [
-			{
-				name: "danmaku-search",
-				position: "right",
-				index: 15,
-				html: `<div style="display:flex;align-items:center;gap:4px;padding:0 6px;cursor:pointer">${DANMAKU_ICON}<span class="cd2-dm-ctrl-text" style="font-size:12px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">弹幕匹配中...</span></div>`,
-				click: () => panelEls.toggle(),
-			},
-		],
+		subtitle: initSubtitle,
+		controls,
 		plugins: [
 			artplayerPluginDanmuku({
 				danmuku: [],
@@ -468,14 +638,368 @@ export async function openPlayer(
 				mount: undefined,
 				heatmap: true,
 			}),
+			artplayerPluginAss({
+				workerUrl: LIBASS_WORKER_SCRIPT_URL,
+				wasmUrl: LIBASS_WASM_URL,
+				fallbackFont: LIBASS_FALLBACK_FONT,
+			}),
 		],
 	});
 
-	// 自动匹配弹幕（多策略）
+	// 将面板挂载到 artplayer 内部
+	currentPlayer.template.$player.appendChild(panelEls.panel);
+
+	// 恢复进度
+	const mem = videoMemory.get(url);
+	if (mem && mem.time > 0) {
+		currentPlayer.on("ready", () => {
+			if (currentPlayer) {
+				currentPlayer.currentTime = mem.time;
+				currentPlayer.notice.show = `已恢复播放进度: ${Math.floor(mem.time / 60)}分${Math.floor(mem.time % 60)}秒`;
+			}
+		});
+	}
+
+	// 绑定保存进度的钩子
+	_saveProgressBeforeDestroy = () => {
+		if (currentPlayer) {
+			const time = currentPlayer.currentTime;
+			if (time > 0 && time < currentPlayer.duration - 5) {
+				videoMemory.set(url, { time, episodeId: _currentEpisodeId, label: danmakuStatusText });
+			}
+		}
+	};
+	setInterval(() => {
+		if (currentPlayer && !currentPlayer.video.paused) {
+			const time = currentPlayer.currentTime;
+			if (time > 0 && time < currentPlayer.duration - 5) {
+				videoMemory.set(url, { time, episodeId: _currentEpisodeId, label: danmakuStatusText });
+			}
+		}
+	}, 10000);
+
+	_cleanupBeforeDestroy = () => {
+		cleanupMkvExtracted();
+		// 用原始描述符恢复（因为 getExt 是只读 getter，不能直接赋值）
+		if (_originalGetExtDescriptor) {
+			try {
+				Object.defineProperty(Artplayer.utils, "getExt", _originalGetExtDescriptor);
+			} catch (_) { /* ignore */ }
+		}
+	};
+
+	// --- 并行执行字幕识别任务 ---
+	
+	// 1. 获取外挂字幕
+	resolveSubtitlesFromOffline(fileName).then((subs) => {
+		_currentSubtitles = subs;
+		applySubtitles(_currentSubtitles);
+	}).catch((err) => {
+		console.warn("[cd2-artplayer] 获取外挂字幕失败:", err);
+	});
+
+	// 2. 快速识别 MKV/MP4 内嵌轨道
+	if (url.toLowerCase().includes(".mkv") || url.includes("preview=true")) {
+		extractMkvMetadata(url).then((mkvSubs) => {
+			if (mkvSubs.length > 0) {
+				_mkvExtractedSubs.push(...mkvSubs);
+				applySubtitles(_currentSubtitles);
+			}
+		});
+	}
+	if (url.toLowerCase().includes(".mp4")) {
+		extractMp4Subtitle(url).then((mp4Subs) => {
+			if (mp4Subs.length > 0) {
+				const subs = mp4Subs.map((s) => ({
+					url: s.url,
+					fileName: `[MP4内嵌] ${s.name} (${s.ext.toUpperCase()})`,
+					isLocal: false,
+					ext: s.ext,
+					isDeferred: false,
+				}));
+				_mkvExtractedSubs.push(...subs);
+				for (const s of subs) {
+					_blobUrlExtCache.set(s.url, s.ext);
+				}
+				applySubtitles(_currentSubtitles);
+			}
+		}).catch(e => console.warn("[cd2-artplayer] MP4内嵌提取失败:", e));
+	}
+
+	// 3. 初始化音频轨道菜单
+	if (currentPlayer) {
+		setupAudioTracks(currentPlayer);
+	}
+
+	// 自动匹配弹幕
 	autoMatch(fileName, panelEls, onSelectEpisode, (text: string) => {
 		danmakuStatusText = text;
 		updateControlText();
+	}, (animes: SearchAnime[], useDirect: boolean) => {
+		_lastAnimes = animes;
+		_lastUseDirect = useDirect;
 	});
+}
+
+// ─── 字幕功能（控制栏按钮） ────────────────────────────
+
+function cleanupMkvExtracted() {
+	for (const sub of _mkvExtractedSubs) {
+		if (sub.url.startsWith("blob:")) {
+			_blobUrlExtCache.delete(sub.url);
+			URL.revokeObjectURL(sub.url);
+		}
+	}
+	_mkvExtractedSubs = [];
+}
+
+function getSubtitleType(fileName: string): string | null {
+	const match = fileName.match(/\\.([^.]+)$/);
+	if (!match) return null;
+	const ext = match[1].toLowerCase();
+	return ["srt", "ass", "vtt", "ssa"].includes(ext) ? ext : null;
+}
+
+/** 异步解析视频 URL 的可加载外挂字幕列表 */
+function resolveSubtitlesFromOffline(filePath: string): Promise<SubtitleItem[]> {
+	return new Promise((resolve, reject) => {
+		if (typeof Win === "undefined") {
+			resolve([]);
+			return;
+		}
+		const msgId = "sup_" + Math.random().toString(36).substring(2);
+		const handler = (e: Event) => {
+			const ce = e as CustomEvent;
+			if (ce.detail && ce.detail.id === msgId) {
+				Win.removeEventListener("cd2-subtitles-resolved", handler);
+				if (ce.detail.error) reject(new Error(ce.detail.error));
+				else resolve(ce.detail.subtitles || []);
+			}
+		};
+		Win.addEventListener("cd2-subtitles-resolved", handler);
+		Win.dispatchEvent(
+			new CustomEvent("cd2-resolve-subtitles", {
+				detail: { id: msgId, targetPath: filePath },
+			}),
+		);
+		// 15秒超时
+		setTimeout(() => {
+			Win.removeEventListener("cd2-subtitles-resolved", handler);
+			resolve([]);
+		}, 15000);
+	});
+}
+
+/** 仅提取 MKV 元数据，实现秒级识别轨道 */
+async function extractMkvMetadata(videoUrl: string): Promise<SubtitleItem[]> {
+	const results: SubtitleItem[] = [];
+	try {
+		console.log("[cd2-artplayer] 开始快速识别 MKV 轨道:", videoUrl);
+		// 这里的 extractSubtitles 如果支持 metadataOnly 会更快，
+		// 如果不支持，我们至少在 applySubtitles 时不立即触发全量解析
+		const tracks = await extractSubtitles(videoUrl, {
+			fetch: gmFetchAdapter,
+		});
+
+		if (!tracks || tracks.length === 0) return results;
+
+		for (const track of tracks) {
+			const ext = track.type === "ssa" ? "ass" : track.type;
+			const sub: SubtitleItem = {
+				url: "", // 初始为空，点击时再提取
+				fileName: `[MKV内嵌] ${track.metadata.trackName || track.metadata.language || "Track"} (${ext.toUpperCase()})`,
+				ext: ext,
+				mkvTrackId: track.metadata.trackNumber,
+				isDeferred: true,
+			};
+
+			// 如果该库已经顺便把内容带出来了（对于小字幕文件通常如此），直接缓存
+			if (track.output.subtitle) {
+				const blob = new window.Blob([track.output.subtitle as any], { type: "text/x-ssa" });
+				sub.url = window.URL.createObjectURL(blob);
+				sub.isDeferred = false;
+				_blobUrlExtCache.set(sub.url, ext);
+			}
+
+			results.push(sub);
+
+			// 收集字体
+			if (track.output.fonts && track.output.fonts.length > 0) {
+				for (const font of track.output.fonts) {
+					const fontBlob = new window.Blob([font.data as any], { type: "application/x-font-ttf" });
+					const fontUrl = window.URL.createObjectURL(fontBlob);
+					_mkvExtractedFonts.push(fontUrl);
+					// 同时也尝试注入到 document 以防原生渲染器需要
+					const fontFace = new FontFace(font.name, `url("${fontUrl}")`);
+					fontFace.load().then(f => document.fonts.add(f)).catch(() => {});
+				}
+			}
+		}
+		
+		// 如果有了新字体，重新初始化 ASS 插件以应用字体
+		if (_mkvExtractedFonts.length > 0 && currentPlayer) {
+			reinitAssPlugin(currentPlayer);
+		}
+
+	} catch (e) {
+		console.warn("[cd2-artplayer] MKV 元数据识别失败:", e);
+	}
+	return results;
+}
+
+function reinitAssPlugin(art: Artplayer) {
+	console.log("[cd2-artplayer] 重新初始化 ASS 插件以应用内嵌字体, 数量:", _mkvExtractedFonts.length);
+	// 这是一个 trick：通过插件配置项将字体传递给 subtitles-octopus
+	art.plugins.add(artplayerPluginAss({
+		workerUrl: LIBASS_WORKER_SCRIPT_URL,
+		wasmUrl: LIBASS_WASM_URL,
+		fallbackFont: LIBASS_FALLBACK_FONT,
+		fonts: _mkvExtractedFonts, // 关键：将字体数组传递给 WASM 渲染器
+	}));
+}
+
+function injectAssFonts(fonts: NonNullable<TrackResult["output"]["fonts"]>) {
+	if (typeof document === "undefined") return;
+	for (const font of fonts) {
+		const blob = new window.Blob([font.data as any], { type: "font/ttf" });
+		const objUrl = window.URL.createObjectURL(blob);
+		const fontFace = new FontFace(font.name, `url("${objUrl}")`);
+		fontFace.load().then((loadedFont) => {
+			document.fonts.add(loadedFont);
+			console.log(`[cd2-artplayer] 载入内嵌字体成功: ${font.name}`);
+		}).catch((err) => {
+			console.warn(`[cd2-artplayer] 字体 ${font.name} 解析失败:`, err);
+		});
+	}
+}
+
+function safeSwitchAss(art: Artplayer, url: string) {
+	const assPlugin = art.plugins.artplayerPluginAss as any;
+	if (!assPlugin) return;
+	try {
+		assPlugin.switch(url);
+		if (art.video && art.video.videoWidth > 0 && art.video.videoHeight > 0) {
+			assPlugin.show();
+		} else {
+			art.once("video:loadedmetadata", () => {
+				try { assPlugin.show(); } catch (e) {}
+			});
+		}
+	} catch (e) {
+		console.warn("[cd2-artplayer] libass 渲染警告:", e);
+	}
+}
+
+/** 整理选择器，配置 ArtPlayer 控制栏里的字幕菜单 */
+function applySubtitles(externalSubs: SubtitleItem[]) {
+	if (!currentPlayer) return;
+
+	// 生成原生内嵌字幕列表 (浏览器能识别的部分，通常为空)
+	const nativeSubs: SubtitleItem[] = [];
+	try {
+		const tracks = currentPlayer.video.textTracks;
+		if (tracks && tracks.length > 0) {
+			for (let i = 0; i < tracks.length; i++) {
+				const track = tracks[i];
+				if (track.kind === "subtitles" || track.kind === "captions") {
+					nativeSubs.push({
+						url: "",
+						fileName: `[浏览器内嵌] ${track.label || track.language || "Track " + (i + 1)}`,
+						isLocal: false,
+					});
+				}
+			}
+		}
+	} catch (e) { /* ignore */ }
+
+	const allSubs = [...externalSubs, ..._mkvExtractedSubs, ...nativeSubs];
+	if (allSubs.length === 0) return;
+
+	const selector: any[] = [{ default: true, html: "关闭字幕", url: "", ext: "", isNativeType: false }];
+	allSubs.forEach((s) => {
+		const ext = s.ext || getSubtitleType(s.fileName) || "vtt";
+		selector.push({
+			default: false,
+			html: s.fileName,
+			url: s.url,
+			ext: ext,
+			isNativeType: s.url === "" && !s.mkvTrackId,
+			mkvTrackId: s.mkvTrackId,
+			isDeferred: s.isDeferred
+		});
+	});
+
+	currentPlayer.controls.update({
+		name: "subtitle-selector",
+		selector: selector,
+	});
+}
+
+/** 动态加载延迟识别的内嵌字幕内容 */
+async function loadDeferredSubtitle(item: any): Promise<string | null> {
+	if (!currentPlayer || !item.mkvTrackId) return null;
+	
+	try {
+		currentPlayer.notice.show = "正在提取内嵌字幕，请稍候...";
+		// 重新调用提取器，这次它会根据之前的元数据缓存快速定位
+		const tracks = await extractSubtitles(currentPlayer.url, {
+			fetch: gmFetchAdapter,
+		});
+		// @ts-ignore
+		const target = tracks.find(t => t.metadata.trackNumber === item.mkvTrackId);
+		if (target && target.output.subtitle) {
+			const ext = target.type === "ssa" ? "ass" : target.type;
+			const blob = new window.Blob([target.output.subtitle as any], { 
+				type: ext === "ass" ? "text/x-ssa" : "text/plain" 
+			});
+			const url = window.URL.createObjectURL(blob);
+			_blobUrlExtCache.set(url, ext);
+			
+			// 更新全局缓存中的这一项
+			const sub = _mkvExtractedSubs.find(s => s.mkvTrackId === item.mkvTrackId);
+			if (sub) {
+				sub.url = url;
+				sub.isDeferred = false;
+			}
+			
+			return url;
+		}
+	} catch (e) {
+		console.error("[cd2-artplayer] 提取字幕内容失败:", e);
+		currentPlayer.notice.show = "提取字幕失败，请重试";
+	}
+	return null;
+}
+
+/** 提取/应用多音轨列表 */
+function setupAudioTracks(art: Artplayer) {
+	try {
+        // audioTracks API
+		const audioTracks = (art.video as any).audioTracks;
+		if (!audioTracks || audioTracks.length <= 1) return;
+		const _selector = [];
+		for (let i = 0; i < audioTracks.length; i++) {
+			_selector.push({
+				default: audioTracks[i].enabled,
+				html: audioTracks[i].label || audioTracks[i].language || `Track ${i + 1}`,
+				trackId: audioTracks[i].id,
+				index: i,
+			});
+		}
+		art.controls.add({
+			name: "audio-selector",
+			position: "right",
+			index: 11,
+			html: `<div style="display:flex;align-items:center;gap:4px;padding:0 6px;cursor:pointer" title="音轨">\uD83C\uDFB5</div>`,
+			selector: _selector,
+			onSelect: (item) => {
+				for (let i = 0; i < audioTracks.length; i++) {
+					audioTracks[i].enabled = (i === item.index);
+				}
+				return item.html;
+			},
+		});
+	} catch (e) { }
 }
 
 // ─── 自动匹配弹幕（多策略，直连优先/API后备）────────────
@@ -485,6 +1009,7 @@ async function autoMatch(
 	panelEls: ReturnType<typeof createDanmakuPanel>,
 	onSelect: (id: number, label: string, useDirect?: boolean) => void,
 	setStatus: (text: string) => void,
+	setLastAnimes: (animes: SearchAnime[], useDirect: boolean) => void,
 ) {
 	const keyword = extractKeyword(fileName);
 	if (keyword) panelEls.input.value = keyword;
@@ -514,7 +1039,7 @@ async function autoMatch(
 			);
 			await onSelect(
 				match.episodeId,
-				`${match.animeTitle} - ${match.episodeTitle}`,
+				match.episodeTitle,
 				true,
 			);
 			return;
@@ -527,13 +1052,14 @@ async function autoMatch(
 			const directSearchResult = await directSearchEpisodes(keyword);
 
 			if (directSearchResult.animes.length > 0) {
-				renderAnimes(panelEls.body, directSearchResult.animes, (id, label) => onSelect(id, label, true));
-
+				setLastAnimes(directSearchResult.animes, true);
 				const best = findBestEpisode(fileName, directSearchResult.animes);
+				renderAnimes(panelEls.body, directSearchResult.animes, (id, label) => onSelect(id, label, true), best?.episodeId);
+
 				if (best) {
 					await onSelect(
 						best.episodeId,
-						`${best.animeTitle} - ${best.episodeTitle}`,
+						best.episodeTitle,
 						true,
 					);
 					return;
@@ -555,12 +1081,13 @@ async function autoMatch(
 				panelEls.input.value = shortKeyword;
 				const directRetryResult = await directSearchEpisodes(shortKeyword);
 				if (directRetryResult.animes.length > 0) {
-					renderAnimes(panelEls.body, directRetryResult.animes, (id, label) => onSelect(id, label, true));
+					setLastAnimes(directRetryResult.animes, true);
 					const best = findBestEpisode(fileName, directRetryResult.animes);
+					renderAnimes(panelEls.body, directRetryResult.animes, (id, label) => onSelect(id, label, true), best?.episodeId);
 					if (best) {
 						await onSelect(
 							best.episodeId,
-							`${best.animeTitle} - ${best.episodeTitle}`,
+							best.episodeTitle,
 							true,
 						);
 						return;
@@ -628,12 +1155,12 @@ async function autoMatch(
 			);
 			await onSelect(
 				match.episodeId,
-				`${match.animeTitle} - ${match.episodeTitle}`,
+				match.episodeTitle,
 			);
 			return;
 		}
 
-		// ── API策略2: 关键词搜索 ──
+		// ── API策略2: 关键词搜索 (原逻辑：番名+季数+集数 / 番名+季数) ──
 		if (keyword) {
 			console.log("[cd2-artplayer] API策略2: 关键词搜索, keyword=", keyword);
 			setStatus("API搜索中...");
@@ -641,13 +1168,14 @@ async function autoMatch(
 			const searchResult = await searchEpisodes(keyword);
 
 			if (searchResult.animes.length > 0) {
-				renderAnimes(panelEls.body, searchResult.animes, onSelect);
-
+				setLastAnimes(searchResult.animes, false);
 				const best = findBestEpisode(fileName, searchResult.animes);
+				renderAnimes(panelEls.body, searchResult.animes, onSelect, best?.episodeId);
+
 				if (best) {
 					await onSelect(
 						best.episodeId,
-						`${best.animeTitle} - ${best.episodeTitle}`,
+						best.episodeTitle,
 					);
 					return;
 				}
@@ -668,12 +1196,13 @@ async function autoMatch(
 				panelEls.input.value = shortKeyword;
 				const retryResult = await searchEpisodes(shortKeyword);
 				if (retryResult.animes.length > 0) {
-					renderAnimes(panelEls.body, retryResult.animes, onSelect);
+					setLastAnimes(retryResult.animes, false);
 					const best = findBestEpisode(fileName, retryResult.animes);
+					renderAnimes(panelEls.body, retryResult.animes, onSelect, best?.episodeId);
 					if (best) {
 						await onSelect(
 							best.episodeId,
-							`${best.animeTitle} - ${best.episodeTitle}`,
+							best.episodeTitle,
 						);
 						return;
 					}
@@ -715,29 +1244,18 @@ function hasCJK(s: string): boolean {
 function extractKeyword(fileName: string): string {
 	const title = extractTitle(fileName);
 	const season = extractSeasonNumber(fileName);
-	const episode = extractEpisodeNumber(fileName);
 
-	// 拼接: 番名 + S0XE0X 或 番名 + 0XX
+	// 拼接: 番名 + 第X季 (中文季数标记匹配率更高)
 	let result = title;
-	if (season && episode) {
-		result += ` S${String(season).padStart(2, "0")}E${String(episode).padStart(2, "0")}`;
-	} else if (episode) {
-		result += ` ${String(episode).padStart(3, "0")}`;
+	if (season) {
+		result += ` 第${season}季`;
 	}
 
 	console.log(`[cd2-artplayer] extractKeyword: "${fileName}" → "${result}"`);
 	return result;
 }
 
-/** 从 extractKeyword 的结果中剥离末尾的集数部分，仅保留番名（用于搜索API） */
-function extractSearchTitle(keyword: string): string {
-	return keyword
-		.replace(/\s+S\d+E\d+$/, "")
-		.replace(/\s+\d{2,3}$/, "")
-		.trim();
-}
-
-// ─── 提取番名（不含季集，符号去除适配模糊匹配） ──────────
+// function extractSearchTitle is removed// ─── 提取番名（不含季集，符号去除适配模糊匹配） ──────────
 
 function extractTitle(fileName: string): string {
 	let name = fileName.replace(/\.[^.]+$/, ""); // 去扩展名
@@ -831,7 +1349,7 @@ function extractTitle(fileName: string): string {
 	if (name.length < 2) {
 		const fallback = fileName
 			.replace(/\.[^.]+$/, "")
-			.replace(/[\u3010\u3011【】\[\]()（）{}「」『』\u2605]/g, " ")
+			.replace(/[\u3010\u3011【】[\]()（）{}「」『』\u2605]/g, " ")
 			.replace(/\b(1080[pi]?|720[pi]?)\\b/gi, "")
 			.replace(/[-_.]/g, " ")
 			.replace(/\s+/g, " ")
@@ -879,6 +1397,14 @@ function extractSeasonNumber(fileName: string): number | null {
 
 function extractEpisodeNumber(fileName: string): number | null {
 	const name = fileName.replace(/\.[^.]+$/, "");
+
+	// 优先匹配中文数字集数（如 第二集、第十二话）
+	const cnEpMatch = name.match(/第([一二三四五六七八九十百零]+)[话話集期]/);
+	if (cnEpMatch) {
+		const num = chineseToNumber(cnEpMatch[1]);
+		if (num > 0 && num < 999) return num;
+	}
+
 	const patterns: RegExp[] = [
 		/第(\d+)[话話集期]/,
 		/\bEP?\s*(\d+)\b/i,
@@ -903,6 +1429,56 @@ function extractEpisodeNumber(fileName: string): number | null {
 
 // ─── 从文件名推断集数并匹配最佳结果 ───────────────────
 
+function chineseToNumber(cnStr: string): number {
+	const cnNums: { [key: string]: number } = { 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10, 零: 0 };
+	if (/^\d+$/.test(cnStr)) return parseInt(cnStr, 10);
+	
+	let result = 0;
+	let current = 0;
+	for (const char of cnStr) {
+		const val = cnNums[char];
+		if (val === undefined) continue;
+		if (val === 10) {
+			if (current === 0) current = 1;
+			result += current * 10;
+			current = 0;
+		} else {
+			current = val;
+		}
+	}
+	result += current;
+	return result;
+}
+
+/**
+ * 从弹幕库返回的集标题中提取集数数字（精确边界匹配）
+ * 例如: "第2话" → 2, "第二十一集" → 21, "EP08" → 8, "某番 8" → 8
+ * 不会让 "第12集" 返回 2（避免子串误匹配）
+ */
+function extractEpNumFromTitle(epTitle: string): number | null {
+	// 1. 中文数字: 第X话/集/期
+	const cnMatch = epTitle.match(/第([一二三四五六七八九十百零]+)[话話集期]/);
+	if (cnMatch) return chineseToNumber(cnMatch[1]);
+
+	// 2. 阿拉伯数字: 第X话/集/期
+	const numMatch = epTitle.match(/第\s*(\d+)\s*[话話集期]/);
+	if (numMatch) return parseInt(numMatch[1], 10);
+
+	// 3. EP/E 格式
+	const epMatch = epTitle.match(/\bEP?\s*(\d+)\b/i);
+	if (epMatch) return parseInt(epMatch[1], 10);
+
+	// 4. 标题末尾独立数字（如 "某番 8"），需严格边界
+	const tailMatch = epTitle.match(/(?:^|[\s\-—_#])\s*(\d{1,4})\s*$/);
+	if (tailMatch) {
+		const n = parseInt(tailMatch[1], 10);
+		// 排除年份、分辨率等干扰数字
+		if (n > 0 && n < 999 && ![1080, 720, 480, 2160, 1920].includes(n)) return n;
+	}
+
+	return null;
+}
+
 function findBestEpisode(
 	fileName: string,
 	animes: SearchAnime[],
@@ -910,20 +1486,18 @@ function findBestEpisode(
 	const epNum = extractEpisodeNumber(fileName);
 	if (epNum === null) return null;
 
+	console.log(`[cd2-artplayer] findBestEpisode: 文件名集数=${epNum}`);
+
 	for (const anime of animes) {
 		for (const ep of anime.episodes) {
-			const epTitle = ep.episodeTitle;
-			const nums = epTitle.match(/\d+/g);
-			if (nums) {
-				for (const n of nums) {
-					if (parseInt(n) === epNum) {
-						return {
-							episodeId: ep.episodeId,
-							animeTitle: anime.animeTitle,
-							episodeTitle: epTitle,
-						};
-					}
-				}
+			const titleEpNum = extractEpNumFromTitle(ep.episodeTitle);
+			if (titleEpNum !== null && titleEpNum === epNum) {
+				console.log(`[cd2-artplayer] findBestEpisode: 匹配成功 "${ep.episodeTitle}" → 集数=${titleEpNum}`);
+				return {
+					episodeId: ep.episodeId,
+					animeTitle: anime.animeTitle,
+					episodeTitle: ep.episodeTitle,
+				};
 			}
 		}
 	}

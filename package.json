@@ -8,5 +8,9 @@
     "ci": "pnpm -r run ci",
     "lint": "pnpm -r run lint",
     "format": "pnpm -r run format"
+  },
+  "devDependencies": {
+    "node-fetch": "^3.3.2",
+    "tsx": "^4.21.0"
   }
 }
