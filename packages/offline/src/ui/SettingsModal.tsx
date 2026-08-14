@@ -1,6 +1,6 @@
 import { App as AntdApp, Button, Divider, Form, Input, Modal, Space, Switch, Typography } from "antd";
 import { useState } from "react";
-import { getConfig, setConfig } from "@/config";
+import { getConfig, getShowDanmakuHeatmap, setConfig, setShowDanmakuHeatmap } from "@/config";
 import { submitOffline } from "@/grpc/client";
 
 export interface SettingsModalProps {
@@ -14,6 +14,7 @@ export function SettingsModal({ open, onClose, panelVisible, onTogglePanel }: Se
   const { notification, message } = AntdApp.useApp();
   const [form] = Form.useForm();
   const [testingUrl, setTestingUrl] = useState("");
+  const [showDanmakuHeatmap, setShowDanmakuHeatmapState] = useState(getShowDanmakuHeatmap());
   const cfg = getConfig();
 
   const onSave = async () => {
@@ -53,7 +54,7 @@ export function SettingsModal({ open, onClose, panelVisible, onTogglePanel }: Se
       <Space direction="vertical" style={{ width: "100%" }}>
         <Form form={form} layout="vertical" initialValues={cfg}>
           <Form.Item name="grpcBaseUrl" label="地址" rules={[{ required: true }]}>
-            <Input placeholder="http://localhost:8080" />
+            <Input placeholder="http://localhost:19798" />
           </Form.Item>
           <Form.Item name="apiToken" label="API Token">
             <Input.Password placeholder="Bearer token 或 API token" />
@@ -63,6 +64,15 @@ export function SettingsModal({ open, onClose, panelVisible, onTogglePanel }: Se
           </Form.Item>
           <Form.Item label="显示悬浮面板">
             <Switch checked={panelVisible} onChange={onTogglePanel} />
+          </Form.Item>
+          <Form.Item label="显示弹幕热力图（进度条上方）">
+            <Switch
+              checked={showDanmakuHeatmap}
+              onChange={(checked) => {
+                setShowDanmakuHeatmapState(checked);
+                setShowDanmakuHeatmap(checked);
+              }}
+            />
           </Form.Item>
           <Space>
             <Button onClick={() => form.resetFields()}>重置</Button>

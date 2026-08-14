@@ -1,0 +1,66 @@
+diff --git a/dist/index.cjs b/dist/index.cjs
+index ac2a7e00190db1cd9128abfb97ec38efea072c1f..23910553deb966075177d7641f233016a9ffe774 100644
+--- a/dist/index.cjs
++++ b/dist/index.cjs
+@@ -749,12 +749,24 @@ async function readTargetedBlocks(reader, segmentDataOffset, cueEntries, subtitl
+       clusterGroups.set(entry.clusterPosition, [entry]);
+     }
+   }
+-  const firstClusterPos = cueEntries[0].clusterPosition;
+-  const probeBuf = await reader.read(segmentDataOffset + firstClusterPos, HEADER_READ_SIZE);
+-  const clusterHeaderSize = parseElementHeader(probeBuf, 0).dataOffset;
+   const directTargets = [];
+   const fallbackClusters = [];
+-  for (const [clusterPos, entries] of clusterGroups) {
++  const positionedGroups = await mapConcurrent(
++    [...clusterGroups],
++    workers,
++    async ([clusterPos, entries]) => {
++      if (!entries.every((e) => e.relativePosition !== void 0)) {
++        return { clusterPos, entries };
++      }
++      const probeBuf = await reader.read(
++        segmentDataOffset + clusterPos,
++        HEADER_READ_SIZE
++      );
++      const clusterHeaderSize = parseElementHeader(probeBuf, 0).dataOffset;
++      return { clusterPos, entries, clusterHeaderSize };
++    }
++  );
++  for (const { clusterPos, entries, clusterHeaderSize } of positionedGroups) {
+     if (entries.every((e) => e.relativePosition !== void 0)) {
+       for (const entry of entries) {
+         directTargets.push({
+diff --git a/dist/index.js b/dist/index.js
+index 491eddf7908bdcf55ca68b10aa3171c53fa66ab2..a7fb08bf346d1133f9796b3dc01ae8d0549e0429 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -721,12 +721,24 @@ async function readTargetedBlocks(reader, segmentDataOffset, cueEntries, subtitl
+       clusterGroups.set(entry.clusterPosition, [entry]);
+     }
+   }
+-  const firstClusterPos = cueEntries[0].clusterPosition;
+-  const probeBuf = await reader.read(segmentDataOffset + firstClusterPos, HEADER_READ_SIZE);
+-  const clusterHeaderSize = parseElementHeader(probeBuf, 0).dataOffset;
+   const directTargets = [];
+   const fallbackClusters = [];
+-  for (const [clusterPos, entries] of clusterGroups) {
++  const positionedGroups = await mapConcurrent(
++    [...clusterGroups],
++    workers,
++    async ([clusterPos, entries]) => {
++      if (!entries.every((e) => e.relativePosition !== void 0)) {
++        return { clusterPos, entries };
++      }
++      const probeBuf = await reader.read(
++        segmentDataOffset + clusterPos,
++        HEADER_READ_SIZE
++      );
++      const clusterHeaderSize = parseElementHeader(probeBuf, 0).dataOffset;
++      return { clusterPos, entries, clusterHeaderSize };
++    }
++  );
++  for (const { clusterPos, entries, clusterHeaderSize } of positionedGroups) {
+     if (entries.every((e) => e.relativePosition !== void 0)) {
+       for (const entry of entries) {
+         directTargets.push({

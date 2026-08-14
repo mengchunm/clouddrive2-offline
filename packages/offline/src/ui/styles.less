@@ -32,8 +32,6 @@
 /* ----- 收起状态：悬浮图标（纯图标，无边框） ----- */
 .cd2-floating-fab {
   position: fixed;
-  left: 16px;
-  bottom: 16px;
   width: 36px;
   height: 36px;
   z-index: 999999;
@@ -49,11 +47,20 @@
   cursor: pointer;
   transition: opacity 0.2s ease, transform 0.2s ease;
   opacity: 0.75;
+  touch-action: none;
+  user-select: none;
 }
 
 .cd2-floating-fab:hover {
   opacity: 1;
   transform: scale(1.1);
+}
+
+.cd2-floating-fab img,
+.cd2-panel-drag-handle img {
+  pointer-events: none;
+  -webkit-user-drag: none;
+  user-select: none;
 }
 
 .cd2-floating-fab:active {
@@ -63,19 +70,30 @@
 /* ----- 展开状态：悬浮面板 ----- */
 .cd2-floating-panel {
   position: fixed;
-  left: 16px;
-  bottom: 16px;
-  width: 640px;
-  max-height: 520px;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
   z-index: 999999;
   pointer-events: auto;
-  overflow: auto;
+  overflow: hidden;
+  overscroll-behavior: contain;
   border-radius: 8px;
   box-shadow: 0 4px 24px rgba(0, 0, 0, 0.15);
 }
 
 .cd2-floating-panel .ant-card {
   border-radius: 8px;
+}
+
+.cd2-floating-panel > .ant-card {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.cd2-floating-panel > .ant-card > .ant-card-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .cd2-floating-panel .ant-card-head {
@@ -88,9 +106,324 @@
   padding: 6px 0;
 }
 
+.cd2-panel-drag-handle {
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+
+.cd2-floating-fab.cd2-is-dragging,
+.cd2-floating-panel.cd2-is-dragging .cd2-panel-drag-handle {
+  cursor: grabbing;
+}
+
+.cd2-floating-fab.cd2-is-dragging {
+  transition: none;
+  transform: none;
+  opacity: 1;
+}
+
+.cd2-panel-resize-edge,
+.cd2-panel-resize-corner {
+  position: absolute;
+  z-index: 4;
+  touch-action: none;
+  user-select: none;
+}
+
+.cd2-panel-resize-edge-right {
+  top: 12px;
+  right: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: ew-resize;
+}
+
+.cd2-panel-resize-edge-top {
+  top: 0;
+  left: 0;
+  right: 12px;
+  height: 6px;
+  cursor: ns-resize;
+}
+
+.cd2-panel-resize-corner {
+  top: 0;
+  right: 0;
+  width: 14px;
+  height: 14px;
+  cursor: nesw-resize;
+}
+
+.cd2-panel-resize-corner::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 6px;
+  height: 6px;
+  border-top: 2px solid rgba(0, 0, 0, 0.28);
+  border-right: 2px solid rgba(0, 0, 0, 0.28);
+}
+
+.cd2-floating-panel.cd2-is-resizing {
+  user-select: none;
+  will-change: width, height;
+}
+
+.cd2-floating-panel.cd2-is-resizing .cd2-task-table {
+  pointer-events: none;
+}
+
+.cd2-floating-panel.cd2-is-resizing .ant-table *,
+.cd2-floating-panel.cd2-is-resizing .ant-pagination * {
+  transition: none !important;
+  animation: none !important;
+}
+
 .cd2-floating-panel .ant-tabs,
 .cd2-floating-panel .ant-table {
   pointer-events: auto;
+}
+
+.cd2-floating-panel .ant-tabs {
+  height: 100%;
+  min-height: 0;
+}
+
+.cd2-floating-panel .ant-tabs-content-holder,
+.cd2-floating-panel .ant-tabs-content,
+.cd2-floating-panel .ant-tabs-tabpane-active {
+  height: 100%;
+  min-height: 0;
+}
+
+.cd2-floating-panel .ant-tabs-content-holder {
+  flex: 1;
+  overflow: hidden;
+}
+
+.cd2-task-list-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.cd2-task-table {
+  position: relative;
+  display: flex;
+  flex: 1;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  contain: layout paint;
+}
+
+.cd2-task-table > .ant-table-wrapper,
+.cd2-task-table .ant-spin-nested-loading,
+.cd2-task-table .ant-spin-container,
+.cd2-task-table .ant-table,
+.cd2-task-table .ant-table-container {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.cd2-task-table .ant-table-body {
+  flex: 1;
+  min-height: 0;
+  max-height: none !important;
+  overflow-y: auto !important;
+  overflow-anchor: none;
+  scrollbar-gutter: stable;
+}
+
+.cd2-task-table .ant-table-header table,
+.cd2-task-table .ant-table-body table {
+  table-layout: fixed !important;
+}
+
+.cd2-task-name-cell {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 4px;
+}
+
+.cd2-task-name-cell > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cd2-task-expand-trigger {
+  max-width: 100%;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.cd2-task-expand-trigger:focus-visible {
+  border-radius: 4px;
+  outline: 2px solid rgba(0, 0, 0, 0.3);
+  outline-offset: 2px;
+}
+
+.cd2-task-fold-icon {
+  display: inline-flex;
+  flex: 0 0 16px;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  color: rgba(0, 0, 0, 0.45);
+  font-size: 11px;
+}
+
+.cd2-task-fold-icon.cd2-is-expandable {
+  color: rgba(0, 0, 0, 0.55);
+}
+
+.cd2-task-expand-trigger:hover .cd2-task-fold-icon.cd2-is-expandable {
+  color: rgba(0, 0, 0, 0.85);
+}
+
+.cd2-task-table .ant-pagination {
+  flex: none;
+  margin: 8px 0 0 !important;
+}
+
+.cd2-task-files-title {
+  min-width: 0;
+  min-height: 34px;
+  padding: 4px 8px;
+  border-bottom: 1px solid rgba(5, 5, 5, 0.06);
+}
+
+.cd2-task-files-title > .ant-typography {
+  min-width: 0;
+  max-width: 620px;
+}
+
+.cd2-task-files-inline,
+.cd2-task-files-table,
+.cd2-task-files-table .ant-spin-nested-loading,
+.cd2-task-files-table .ant-spin-container,
+.cd2-task-files-table .ant-table,
+.cd2-task-files-table .ant-table-container {
+  width: 100% !important;
+  min-width: 0 !important;
+  margin-inline: 0 !important;
+}
+
+.cd2-task-files-table .ant-table,
+.cd2-task-files-table .ant-table-container,
+.cd2-task-files-table .ant-table-cell {
+  background: transparent !important;
+}
+
+.cd2-task-files-table .ant-table-thead > tr > th {
+  background: rgba(0, 0, 0, 0.025);
+}
+
+.cd2-task-files-inline {
+  min-width: 0;
+  overflow: hidden;
+  background: rgba(22, 119, 255, 0.075);
+}
+
+.cd2-task-table .ant-table-expanded-row > td {
+  padding: 0 !important;
+  border-inline-start: 0 !important;
+  background: transparent !important;
+}
+
+.cd2-task-file-name {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  background: transparent;
+  border: 0;
+}
+
+.cd2-task-tree-trigger {
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.cd2-task-tree-trigger:focus-visible {
+  border-radius: 3px;
+  outline: 1px solid rgba(0, 0, 0, 0.4);
+  outline-offset: 2px;
+}
+
+.cd2-task-file-name > span:last-child,
+.cd2-task-file-label > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cd2-task-file-label {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+  gap: 6px;
+}
+
+.cd2-task-tree-name-cell {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  min-height: 40px;
+  max-width: 100%;
+  margin-block: -8px;
+}
+
+.cd2-task-tree-indents {
+  display: inline-flex;
+  flex: none;
+}
+
+.cd2-task-tree-indent {
+  display: inline-block;
+  flex: 0 0 14px;
+  width: 14px;
+}
+
+.cd2-task-tree-fold {
+  display: inline-flex;
+  flex: 0 0 14px;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  font-size: 10px;
+}
+
+.cd2-task-file-type-icon {
+  display: inline-flex;
+  flex: 0 0 14px;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  color: currentColor;
+  font-size: 14px;
 }
 
 /* ----- 磁力链接旁注入图标按钮 ----- */
@@ -168,5 +501,37 @@
 @media (prefers-color-scheme: dark) {
   .cd2-row-highlight {
     background-color: rgba(22, 119, 255, 0.15) !important;
+  }
+
+  .cd2-task-fold-icon {
+    color: rgba(255, 255, 255, 0.55);
+  }
+
+  .cd2-task-fold-icon.cd2-is-expandable {
+    color: rgba(255, 255, 255, 0.62);
+  }
+
+  .cd2-task-expand-trigger:hover .cd2-task-fold-icon.cd2-is-expandable {
+    color: rgba(255, 255, 255, 0.9);
+  }
+
+  .cd2-task-expand-trigger:focus-visible {
+    outline-color: rgba(255, 255, 255, 0.45);
+  }
+
+  .cd2-task-tree-trigger:focus-visible {
+    outline-color: rgba(255, 255, 255, 0.5);
+  }
+
+  .cd2-task-files-title {
+    border-bottom-color: rgba(255, 255, 255, 0.08);
+  }
+
+  .cd2-task-files-table .ant-table-thead > tr > th {
+    background: rgba(255, 255, 255, 0.035);
+  }
+
+  .cd2-task-files-inline {
+    background: rgba(22, 119, 255, 0.13);
   }
 }

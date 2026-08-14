@@ -1,5 +1,7 @@
 # clouddrive2-offline
 
+> 兼容 userscript。当前推荐安装方式是仓库根目录说明的 Chromium 浏览器扩展。
+
 > 基于 [sqzw-x/clouddrive2-offline](https://github.com/sqzw-x/clouddrive2-offline) 的增强 fork 版本。
 > 感谢原作者的开源贡献。
 

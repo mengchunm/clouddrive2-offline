@@ -81,10 +81,7 @@ function extractMagnetUrl(el: HTMLElement): string | null {
     return el.href;
   }
   // 2. <input value="magnet:..."> / <textarea>
-  if (
-    (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) &&
-    MAGNET_ATTR_RE.test(el.value)
-  ) {
+  if ((el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) && MAGNET_ATTR_RE.test(el.value)) {
     return el.value;
   }
   // 3. 任意 data-* 属性
@@ -160,9 +157,7 @@ const TEXT_SCAN_SELECTORS = "td, th, span, code, pre, p, li, dd, dt, label";
  *
  * @param root 扫描范围，默认为 document
  */
-function collectSingleMagnetElements(
-  root: ParentNode = document,
-): { el: HTMLElement; magnetUrl: string }[] {
+function collectSingleMagnetElements(root: ParentNode = document): { el: HTMLElement; magnetUrl: string }[] {
   const results: { el: HTMLElement; magnetUrl: string }[] = [];
   const seen = new Set<HTMLElement>();
 
@@ -200,9 +195,7 @@ function collectSingleMagnetElements(
  *
  * @param root 扫描范围，默认为 document
  */
-function collectMagnetCheckboxes(
-  root: ParentNode = document,
-): { checkbox: HTMLInputElement; magnetUrl: string }[] {
+function collectMagnetCheckboxes(root: ParentNode = document): { checkbox: HTMLInputElement; magnetUrl: string }[] {
   const results: { checkbox: HTMLInputElement; magnetUrl: string }[] = [];
   root.querySelectorAll<HTMLInputElement>('input[type="checkbox"]').forEach((cb) => {
     const url = extractMagnetUrl(cb);
@@ -458,7 +451,7 @@ function processRoots(roots: HTMLElement[]) {
 
 // ─── 入口 ──────────────────────────────────────────────
 
-(function main() {
+export function startOffline() {
   const container = ensureContainer();
   const root = createRoot(container);
 
@@ -525,4 +518,9 @@ function processRoots(roots: HTMLElement[]) {
   // 启动 MutationObserver
   const mo = new MutationObserver(onMutation);
   mo.observe(document.documentElement, { childList: true, subtree: true });
-})();
+}
+
+const extensionRuntime = (globalThis as typeof globalThis & { chrome?: { runtime?: { id?: string } } }).chrome?.runtime;
+if (!extensionRuntime?.id) {
+  startOffline();
+}

@@ -2,6 +2,7 @@ import { create } from "@bufbuild/protobuf";
 import { EmptySchema } from "@bufbuild/protobuf/wkt";
 import { type Client, createClient, type Interceptor } from "@connectrpc/connect";
 import { createGrpcWebTransport } from "@connectrpc/connect-web";
+import { GM_getValue, GM_setValue } from "vite-plugin-monkey/dist/client";
 import { getConfig } from "@/config";
 import {
   AddOfflineFileRequestSchema,
@@ -11,9 +12,12 @@ import {
   CloudDrivePushMessage_MessageType,
   type DownloadUrlPathInfo,
   type FileOperationResult,
+  FileRequestSchema,
   FindFileByPathRequestSchema,
   GetDownloadUrlPathRequestSchema,
   ListSubFileRequestSchema,
+  type MountPoint,
+  MultiFileRequestSchema,
   OfflineFileListAllRequestSchema,
   type OfflineFileListAllResult,
   type OfflineQuotaInfo,
@@ -21,6 +25,17 @@ import {
   RemoveOfflineFilesRequestSchema,
 } from "@/proto/clouddrive_pb";
 import gmFetch from "./gmFetch";
+
+type CloudContext = { cloudName: string; cloudAccountId: string; path?: string };
+type StoredCloudContext = CloudContext & { scope: string };
+const CLOUD_CONTEXT_CACHE_KEY = "cd2_cloud_context_v1";
+let cloudContextCache: StoredCloudContext | undefined;
+let cloudContextRequest: { scope: string; promise: Promise<CloudContext> } | undefined;
+
+function getCloudContextScope(path: string): string {
+  const cfg = getConfig();
+  return `${cfg.grpcBaseUrl}\n${cfg.apiToken}\n${path}`;
+}
 
 function getCloudDriveClient(): Client<typeof CloudDriveFileSrv> {
   const cfg = getConfig();
@@ -97,16 +112,43 @@ export async function getFolderCloudAPI(p: string): Promise<CloudAPI | undefined
 /**
  * Resolve cloudName/cloudAccountId from a configured path (default to cfg.offlineDestPath)
  */
-async function resolveCloudContext(
-  pathOverride?: string,
-): Promise<{ cloudName: string; cloudAccountId: string; path?: string }> {
+async function resolveCloudContext(pathOverride?: string): Promise<CloudContext> {
   const cfg = getConfig();
   const folderPath = pathOverride ?? cfg.offlineDestPath;
-  const api = await getFolderCloudAPI(folderPath);
-  if (!api) {
-    throw new Error("无法获取云盘信息，请先在设置中正确配置“离线下载路径”");
+  const scope = getCloudContextScope(folderPath);
+  if (cloudContextCache?.scope === scope) return cloudContextCache;
+  const stored = GM_getValue<StoredCloudContext | null>(CLOUD_CONTEXT_CACHE_KEY, null);
+  if (stored?.scope === scope && stored.cloudName && stored.cloudAccountId) cloudContextCache = stored;
+  if (cloudContextRequest?.scope === scope) return cloudContextRequest.promise;
+
+  const promise = (async (): Promise<CloudContext> => {
+    // Directory metadata can be temporarily unavailable while CloudDrive2 is
+    // refreshing the destination. Retry once, then reuse the last successful
+    // identity for the exact same server/token/path scope.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const api = await getFolderCloudAPI(folderPath);
+      if (api?.name && api.userName) {
+        const resolved: StoredCloudContext = {
+          scope,
+          cloudName: api.name,
+          cloudAccountId: api.userName,
+          path: folderPath,
+        };
+        cloudContextCache = resolved;
+        GM_setValue(CLOUD_CONTEXT_CACHE_KEY, resolved);
+        return resolved;
+      }
+      if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    if (cloudContextCache?.scope === scope) return cloudContextCache;
+    throw new Error("无法获取云盘信息，请检查 CloudDrive2 连接和“离线下载路径”设置");
+  })();
+  cloudContextRequest = { scope, promise };
+  try {
+    return await promise;
+  } finally {
+    if (cloudContextRequest?.promise === promise) cloudContextRequest = undefined;
   }
-  return { cloudName: api.name, cloudAccountId: api.userName, path: folderPath };
 }
 
 /** 列出全局离线任务（分页） */
@@ -125,12 +167,32 @@ export async function getOfflineQuotaInfo(pathOverride?: string): Promise<Offlin
   return await client.getOfflineQuotaInfo(req);
 }
 
+/** 获取 CloudDrive2 服务端当前配置的挂载点。 */
+export async function getMountPoints(): Promise<MountPoint[]> {
+  const client = getCloudDriveClient();
+  const result = await client.getMountPoints(create(EmptySchema, {}));
+  return result.mountPoints;
+}
+
 /** 批量删除/取消离线任务 */
 export async function removeOfflineFilesBulk(infoHashes: string[], deleteFiles: boolean, pathOverride?: string) {
   const client = getCloudDriveClient();
   const { cloudName, cloudAccountId, path } = await resolveCloudContext(pathOverride);
   const req = create(RemoveOfflineFilesRequestSchema, { cloudName, cloudAccountId, deleteFiles, infoHashes, path });
   return await client.removeOfflineFiles(req);
+}
+
+/** 通过 CloudDrive2 删除一个或多个云端文件/目录（进入对应云盘回收站）。 */
+export async function deleteCloudFiles(paths: string[]): Promise<FileOperationResult> {
+  const uniquePaths = [...new Set(paths.filter(Boolean))];
+  if (uniquePaths.length === 0) throw new Error("没有可删除的文件");
+  const client = getCloudDriveClient();
+  const result =
+    uniquePaths.length === 1
+      ? await client.deleteFile(create(FileRequestSchema, { path: uniquePaths[0] }))
+      : await client.deleteFiles(create(MultiFileRequestSchema, { path: uniquePaths }));
+  if (!result.success) throw new Error(result.errorMessage || "CloudDrive2 删除文件失败");
+  return result;
 }
 
 /**
@@ -169,7 +231,11 @@ export async function getDownloadUrlPath(path: string, preview: boolean = false)
  * @param path 文件夹路径
  * @param forceRefresh 是否强制刷新目录缓存
  */
-export async function listSubFiles(path: string, forceRefresh: boolean = false): Promise<CloudDriveFile[]> {
+export async function listSubFiles(
+  path: string,
+  forceRefresh: boolean = false,
+  throwOnError: boolean = false,
+): Promise<CloudDriveFile[]> {
   const client = getCloudDriveClient();
   const req = create(ListSubFileRequestSchema, { path, forceRefresh });
   const files: CloudDriveFile[] = [];
@@ -181,6 +247,7 @@ export async function listSubFiles(path: string, forceRefresh: boolean = false):
     }
   } catch (err) {
     console.error("ListSubFiles Error:", err);
+    if (throwOnError) throw err;
   }
   return files;
 }
@@ -209,7 +276,52 @@ function getStreamingClient(): Client<typeof CloudDriveFileSrv> {
  * 订阅 PushMessage 服务端流式推送。
  * 当收到 DOWNLOADER_COUNT 或 FILE_SYSTEM_CHANGE 事件时回调 onRefresh。
  */
-export function subscribePushMessage(onRefresh: () => void, signal: AbortSignal): void {
+export type TrackedTaskLocation = {
+  taskKey: string;
+  fileId: string;
+  path: string;
+  originalPath: string;
+  status: "present" | "moved" | "deleted";
+};
+
+export function subscribePushMessage(
+  onRefresh: () => void,
+  signal: AbortSignal,
+  onLocations?: (locations: Record<string, TrackedTaskLocation>) => void,
+): void {
+  const extensionRuntime = (
+    globalThis as typeof globalThis & {
+      chrome?: {
+        runtime?: {
+          id?: string;
+          connect?: (connectInfo: { name: string }) => {
+            disconnect: () => void;
+            onMessage: {
+              addListener: (
+                listener: (message: {
+                  type?: string;
+                  location?: TrackedTaskLocation;
+                  locations?: Record<string, TrackedTaskLocation>;
+                }) => void,
+              ) => void;
+            };
+          };
+        };
+      };
+    }
+  ).chrome?.runtime;
+  if (extensionRuntime?.id && extensionRuntime.connect) {
+    const port = extensionRuntime.connect({ name: "cd2-push-events" });
+    port.onMessage.addListener((message) => {
+      if (message?.type === "cd2-task-state-changed" && !signal.aborted) onRefresh();
+      else if (message?.type === "cd2-task-locations" && message.locations) onLocations?.(message.locations);
+      else if (message?.type === "cd2-task-location-changed" && message.location) {
+        onLocations?.({ [message.location.taskKey]: message.location });
+      }
+    });
+    signal.addEventListener("abort", () => port.disconnect(), { once: true });
+    return;
+  }
   const client = getStreamingClient();
 
   const connect = async () => {

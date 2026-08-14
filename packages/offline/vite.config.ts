@@ -24,7 +24,7 @@ export default defineConfig({
         homepage: "https://github.com/mengchunm/clouddrive2-offline",
         match: ["https://*/*", "http://*/*"],
         connect: ["*"],
-        grant: ["GM_registerMenuCommand", "GM_getValue", "GM_setValue", "unsafeWindow"],
+        grant: ["GM_registerMenuCommand", "GM_getValue", "GM_setValue", "GM_setClipboard", "unsafeWindow"],
       },
       build: {
         externalGlobals: {

@@ -2,3 +2,13 @@ node_modules
 dist
 .DS_Store
 .worktrees/
+package-lock.json
+packages/*/pnpm-lock.yaml
+
+# Extension runtime assets generated from installed dependencies.
+packages/extension/public/libav/
+packages/extension/public/native-host/
+packages/extension/public/libass/subtitles-octopus-worker.js
+packages/extension/public/libass/subtitles-octopus-worker.wasm
+packages/extension/build/
+packages/extension/archive/

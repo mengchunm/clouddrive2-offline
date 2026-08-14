@@ -30,7 +30,9 @@ const DANDANPLAY_PROXY = "https://api.danmaku.weeblify.app/ddp/v1";
 const DIRECT_TIMEOUT_MS = 8000;
 
 export function getApiUrl(): string {
-	return (GM_getValue(CONFIG_KEY_API_URL, DEFAULT_API_URL) as string).trim().replace(/\/+$/, "");
+	return (GM_getValue(CONFIG_KEY_API_URL, DEFAULT_API_URL) as string)
+		.trim()
+		.replace(/\/+$/, "");
 }
 
 export function setApiUrl(v: string) {
@@ -55,9 +57,9 @@ const MODE_LABELS: Record<DanmuMode, string> = {
 };
 
 export function getDanmuMode(): DanmuMode {
-	const v = GM_getValue(CONFIG_KEY_DANMU_MODE, "auto") as string;
+	const v = GM_getValue(CONFIG_KEY_DANMU_MODE, "direct") as string;
 	if (v === "direct" || v === "api") return v;
-	return "auto";
+	return v === "auto" ? "auto" : "direct";
 }
 
 export function setDanmuMode(mode: DanmuMode) {
@@ -177,12 +179,16 @@ function gmFetch<T>(
 	});
 }
 
-/** 
+/**
  * 提供给 @cryguy/mkv-subtitle-extractor 等第三方库使用的标准 fetch 适配器
  * 拦截请求交由 GM_xmlhttpRequest 处理以避开 CORS 限制，支持 ArrayBuffer 返回
  */
-export function gmFetchAdapter(url: string | URL | Request, options?: RequestInit): Promise<Response> {
-	const targetUrl = typeof url === 'string' ? url : (url as URL).href || (url as Request).url;
+export function gmFetchAdapter(
+	url: string | URL | Request,
+	options?: RequestInit,
+): Promise<Response> {
+	const targetUrl =
+		typeof url === "string" ? url : (url as URL).href || (url as Request).url;
 	return new Promise((resolve, reject) => {
 		// 转换传入的 headers (可能是 Headers 对象，或者是 Record)
 		const reqHeaders: Record<string, string> = {};
@@ -199,27 +205,33 @@ export function gmFetchAdapter(url: string | URL | Request, options?: RequestIni
 		console.log(`[cd2-gmFetchAdapter] 发起请求: ${targetUrl}`, reqHeaders);
 
 		GM_xmlhttpRequest({
-			method: (options?.method || "GET") as any,
+			method: options?.method ?? "GET",
 			url: targetUrl,
 			headers: reqHeaders,
-			data: options?.body as any,
+			data:
+				typeof options?.body === "string"
+					? options.body
+					: options?.body instanceof URLSearchParams
+						? options.body.toString()
+						: undefined,
 			responseType: "arraybuffer",
 			onload(res) {
 				const responseHeaders = new Headers();
 				let hasContentRange = false;
 				let contentLength = -1;
-				
+
 				if (res.responseHeaders) {
 					// GM_xmlhttpRequest 的 responseHeaders 通常是 \r\n 分隔的纯文本
-					res.responseHeaders.split(/\r?\n/).forEach(line => {
+					res.responseHeaders.split(/\r?\n/).forEach((line) => {
 						if (!line.trim()) return;
 						const index = line.indexOf(":");
 						if (index > 0) {
 							const key = line.substring(0, index).trim();
 							const val = line.substring(index + 1).trim();
 							responseHeaders.append(key, val);
-							if (key.toLowerCase() === 'content-range') hasContentRange = true;
-							if (key.toLowerCase() === 'content-length') contentLength = parseInt(val, 10);
+							if (key.toLowerCase() === "content-range") hasContentRange = true;
+							if (key.toLowerCase() === "content-length")
+								contentLength = parseInt(val, 10);
 						}
 					});
 				}
@@ -230,11 +242,13 @@ export function gmFetchAdapter(url: string | URL | Request, options?: RequestIni
 					buf = buf.slice(0, contentLength);
 				}
 
-				console.log(`[cd2-gmFetchAdapter] 收到响应: ${res.status} byteLength=${buf ? buf.byteLength : 0} Content-Range=${hasContentRange}`);
+				console.log(
+					`[cd2-gmFetchAdapter] 收到响应: ${res.status} byteLength=${buf ? buf.byteLength : 0} Content-Range=${hasContentRange}`,
+				);
 
 				// 重要：mkv-subtitle-extractor 严格要求 206 状态码才认为支持 Range
 				// 阿里云盘/网盘直链有时候返回 200 但其实带了 Content-Range，我们强制重置为 206
-				const status = (hasContentRange && res.status === 200) ? 206 : res.status;
+				const status = hasContentRange && res.status === 200 ? 206 : res.status;
 
 				const response = new Response(buf, {
 					status: status,
@@ -248,7 +262,7 @@ export function gmFetchAdapter(url: string | URL | Request, options?: RequestIni
 			},
 			ontimeout() {
 				reject(new Error("Fetch timeout"));
-			}
+			},
 		});
 	});
 }
@@ -357,9 +371,9 @@ export async function loadDanmaku(
 // 直连弹弹Play代理 API 方法（优先方案，无需自部署服务）
 // ═══════════════════════════════════════════════════════════
 
-/** 弹弹Play代理返回的包裹结构 */
-interface DandanProxyResponse<T> {
-	data: T;
+/** 代理只接受一个 path 参数，内层查询串必须作为整体编码。 */
+function directProxyUrl(path: string): string {
+	return `${DANDANPLAY_PROXY}?path=${encodeURIComponent(path)}`;
 }
 
 /**
@@ -374,14 +388,11 @@ export async function directMatchVideo(fileName: string): Promise<MatchResult> {
 		matchMode: "hashAndFileName",
 	});
 	// 弹弹Play match 是 POST 接口，代理使用 path 参数
-	const resp = await gmFetch<MatchResult>(
-		`${DANDANPLAY_PROXY}?path=/v2/match`,
-		{
-			method: "POST",
-			body,
-			timeout: DIRECT_TIMEOUT_MS,
-		},
-	);
+	const resp = await gmFetch<MatchResult>(directProxyUrl("/v2/match"), {
+		method: "POST",
+		body,
+		timeout: DIRECT_TIMEOUT_MS,
+	});
 	return resp;
 }
 
@@ -392,7 +403,7 @@ export async function directSearchEpisodes(
 	keyword: string,
 ): Promise<SearchEpisodeResult> {
 	const resp = await gmFetch<SearchEpisodeResult>(
-		`${DANDANPLAY_PROXY}?path=/v2/search/episodes?anime=${encodeURIComponent(keyword)}`,
+		directProxyUrl(`/v2/search/episodes?anime=${encodeURIComponent(keyword)}`),
 		{ timeout: DIRECT_TIMEOUT_MS },
 	);
 	return resp;
@@ -406,7 +417,9 @@ export async function directFetchComments(
 	withRelated = true,
 ): Promise<CommentResponse> {
 	const resp = await gmFetch<CommentResponse>(
-		`${DANDANPLAY_PROXY}?path=/v2/comment/${episodeId}?from=0&withRelated=${withRelated}&chConvert=0`,
+		directProxyUrl(
+			`/v2/comment/${episodeId}?from=0&withRelated=${withRelated}&chConvert=0`,
+		),
 		{ timeout: DIRECT_TIMEOUT_MS },
 	);
 	return resp;

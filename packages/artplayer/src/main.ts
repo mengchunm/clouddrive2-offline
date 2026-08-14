@@ -22,7 +22,12 @@ import {
 	hasApiUrl,
 	setApiUrl,
 } from "./danmu-api";
-import { destroyPlayer, openPlayer } from "./player";
+import {
+	destroyPlayer,
+	openPlayer,
+	preloadPlayerAudio,
+	restorePlayerAfterReload,
+} from "./player";
 
 // ─── 播放事件类型定义 ────────────────────────────────────
 
@@ -47,6 +52,14 @@ export interface PlayVideoDetail {
 	playlist?: PlaylistItem[];
 	currentIndex?: number;
 	subtitles?: SubtitleFile[];
+	fileSize?: number;
+}
+
+interface PreloadVideoAudioDetail {
+	videoUrl: string;
+	fileSize?: number;
+	filePath?: string;
+	fileName?: string;
 }
 
 // ─── 事件监听 ────────────────────────────────────────────
@@ -60,9 +73,31 @@ function handlePlayVideo(e: CustomEvent<PlayVideoDetail>) {
 
 	console.log("[cd2-artplayer] 收到播放请求:", detail.fileName);
 
-	openPlayer(detail.videoUrl, detail.fileName, undefined, detail.playlist, detail.currentIndex, detail.folderName, detail.subtitles).catch((err) => {
+	openPlayer(
+		detail.videoUrl,
+		detail.fileName,
+		detail.filePath,
+		undefined,
+		detail.playlist,
+		detail.currentIndex,
+		detail.folderName,
+		detail.subtitles,
+		undefined,
+		detail.fileSize,
+	).catch((err) => {
 		console.error("[cd2-artplayer] 播放失败:", err);
 	});
+}
+
+function handlePreloadVideoAudio(e: CustomEvent<PreloadVideoAudioDetail>) {
+	const detail = e.detail;
+	if (!detail?.videoUrl) return;
+	preloadPlayerAudio(
+		detail.videoUrl,
+		detail.fileSize,
+		detail.filePath,
+		detail.fileName,
+	);
 }
 
 // ─── 弹幕 API 配置对话框 ────────────────────────────────
@@ -97,7 +132,9 @@ function registerMenuCommands() {
 
 	GM_registerMenuCommand(`🔄 弹幕模式: ${getDanmuModeLabel()}`, () => {
 		const newMode = cycleDanmuMode();
-		alert(`弹幕模式已切换为: ${getDanmuModeLabel(newMode)}\n\n下次播放时生效。`);
+		alert(
+			`弹幕模式已切换为: ${getDanmuModeLabel(newMode)}\n\n下次播放时生效。`,
+		);
 	});
 
 	GM_registerMenuCommand("关闭播放器", () => {
@@ -115,7 +152,7 @@ function registerMenuCommands() {
 
 // ─── 入口 ────────────────────────────────────────────────
 
-(function main() {
+export function startArtplayer() {
 	console.log("[cd2-artplayer] 脚本已加载");
 
 	// 检查弹幕API配置（直连弹弹Play代理无需配置，此提示仅与后备API相关）
@@ -135,5 +172,25 @@ function registerMenuCommands() {
 		"cd2-play-video",
 		handlePlayVideo as EventListener,
 	);
+	unsafeWindow.addEventListener(
+		"cd2-preload-video-audio",
+		handlePreloadVideoAudio as EventListener,
+	);
 	unsafeWindow.dispatchEvent(new CustomEvent("cd2-artplayer-ready"));
-})();
+
+	// 给离线任务组件留出挂载事件桥的时间，再恢复刷新前打开的播放器。
+	window.setTimeout(() => {
+		void restorePlayerAfterReload().catch((error) => {
+			console.warn("[cd2-artplayer] 刷新后恢复播放器失败:", error);
+		});
+	}, 250);
+}
+
+const extensionRuntime = (
+	globalThis as typeof globalThis & {
+		chrome?: { runtime?: { id?: string } };
+	}
+).chrome?.runtime;
+if (!extensionRuntime?.id) {
+	startArtplayer();
+}

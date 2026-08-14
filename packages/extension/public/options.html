@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CloudDrive2 Offline 设置</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main>
+      <h1>CloudDrive2 Offline 设置</h1>
+      <p class="hint">配置浏览器能够访问的 CloudDrive2 gRPC-Web 地址。</p>
+      <form id="settings-form">
+        <label>
+          CloudDrive2 地址
+          <input id="grpcBaseUrl" type="url" required placeholder="http://localhost:19798" />
+        </label>
+        <label>
+          API Token
+          <input id="apiToken" type="password" autocomplete="off" placeholder="Bearer token 或 API token" />
+        </label>
+        <label>
+          离线下载路径
+          <input id="offlineDestPath" type="text" required placeholder="/" />
+        </label>
+        <label class="check-row">
+          <input id="showPanel" type="checkbox" />
+          在检测到磁力链接时显示悬浮面板
+        </label>
+        <label class="check-row">
+          <input id="showDanmakuHeatmap" type="checkbox" />
+          显示弹幕热力图（进度条上方的弹幕密度波形）
+        </label>
+        <section class="native-section cache-section">
+          <div class="native-heading">
+            <strong>视频分片缓存</strong>
+            <span id="mediaCacheStatus" class="native-status" data-tone="checking">正在统计…</span>
+          </div>
+          <label class="check-row">
+            <input id="mediaCacheEnabled" type="checkbox" />
+            刷新页面后复用已经加载的视频分片
+          </label>
+          <div class="native-actions">
+            <button id="clearMediaCache" type="button" class="text-button">清理视频缓存</button>
+          </div>
+          <p class="native-note">按 4 MB 分片持久保存，最多使用 2 GB；空间不足时自动清理最久未使用的分片。</p>
+        </section>
+        <section class="native-section">
+          <div class="native-heading">
+            <strong>本地文件定位助手</strong>
+            <span id="nativeStatus" class="native-status" data-tone="checking">正在检测…</span>
+          </div>
+          <p>用于在任务文件列表中打开目录，或在 Windows 文件管理器中选中具体文件。</p>
+          <div class="native-actions">
+            <button id="downloadNativeInstaller" type="button" class="secondary-button">下载脚本</button>
+            <button id="uninstallNativeHost" type="button" class="text-button">卸载脚本</button>
+          </div>
+          <p class="native-note">脚本随扩展打包；下载后运行一次即可，不安装 EXE、服务或驱动。</p>
+        </section>
+        <div class="actions">
+          <button type="submit">保存设置</button>
+          <span id="status" role="status"></span>
+        </div>
+      </form>
+      <aside>若 CloudDrive2 不在本机，请填写当前电脑能访问的局域网地址，不能填写远端设备的 localhost。</aside>
+    </main>
+    <script src="options.js"></script>
+  </body>
+</html>

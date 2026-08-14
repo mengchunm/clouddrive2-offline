@@ -12,7 +12,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       
       - name: Install pnpm
         uses: pnpm/action-setup@v4
@@ -21,16 +21,25 @@ jobs:
           run_install: false
           
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: 24
           cache: 'pnpm'
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile=false
+        run: pnpm install --frozen-lockfile
+
+      - name: Install FFmpeg test dependency
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Run checks
+        run: pnpm run ci && pnpm run typecheck && pnpm run test
 
       - name: Build
         run: pnpm run build
+
+      - name: Package browser extension
+        run: cd packages/extension/build && zip -r ../clouddrive2-browser-extension.zip .
 
       - name: Create or Update Release
         uses: softprops/action-gh-release@v2
@@ -40,5 +49,6 @@ jobs:
           files: |
             packages/offline/dist/clouddrive2-offline.user.js
             packages/artplayer/dist/clouddrive2-artplayer.user.js
+            packages/extension/clouddrive2-browser-extension.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

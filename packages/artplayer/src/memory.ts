@@ -19,6 +19,12 @@ import {
 
 const MAX_RECORD_COUNT = 500;
 
+function isInvalidatedExtensionContext(error: unknown): boolean {
+	return /extension context invalidated/i.test(
+		error instanceof Error ? error.message : String(error),
+	);
+}
+
 export interface MemoryRecord<T> {
 	data: T;
 	updatedAt: number;
@@ -44,7 +50,7 @@ export class MemoryStore<T> {
 	private readAll(): Record<string, MemoryRecord<T>> {
 		try {
 			if (this.backend === "gm") {
-				return (GM_getValue(this.key, {}) as Record<string, MemoryRecord<T>>);
+				return GM_getValue(this.key, {}) as Record<string, MemoryRecord<T>>;
 			}
 			// shared: 使用 unsafeWindow.localStorage（页面上下文）
 			const stored = unsafeWindow.localStorage.getItem(this.key);
@@ -70,7 +76,9 @@ export class MemoryStore<T> {
 				unsafeWindow.localStorage.setItem(this.key, JSON.stringify(toWrite));
 			}
 		} catch (e) {
-			console.warn("MemoryStore write failed", e);
+			if (!isInvalidatedExtensionContext(e)) {
+				console.warn("MemoryStore write failed", e);
+			}
 		}
 	}
 
@@ -87,7 +95,23 @@ export class MemoryStore<T> {
 }
 
 /** 跨脚本共享：文件夹→上次播放文件路径（offline 和 artplayer 都读写） */
-export const playlistMemory = new MemoryStore<{ filePath: string }>("cd2_playlist_mem", 500, "shared");
+export const playlistMemory = new MemoryStore<{ filePath: string }>(
+	"cd2_playlist_mem",
+	500,
+	"shared",
+);
 
 /** 脚本内部：视频→播放进度 + 弹幕匹配信息 */
-export const videoMemory = new MemoryStore<{ time: number; episodeId?: number; label?: string; useDirect?: boolean }>("cd2_video_mem", 2000, "gm");
+export const videoMemory = new MemoryStore<{
+	time: number;
+	episodeId?: number;
+	label?: string;
+	useDirect?: boolean;
+}>("cd2_video_mem", 2000, "gm");
+
+/** 每个视频记忆用户选择的字幕轨道；键优先使用稳定的 CloudDrive2 文件路径。 */
+export const subtitleMemory = new MemoryStore<{ identity: string }>(
+	"cd2_subtitle_mem",
+	1000,
+	"gm",
+);
