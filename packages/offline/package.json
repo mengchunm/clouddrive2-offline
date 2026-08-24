@@ -18,6 +18,7 @@
     "test:local-mount": "node scripts/test-local-mount.mjs",
     "test:media-playlist": "node scripts/test-media-playlist.mjs",
     "test:task-root-match": "node scripts/test-task-root-match.mjs",
+    "test:core": "node scripts/test-core-behavior.mjs",
     "ci": "biome ci",
     "typecheck": "tsc --noEmit",
     "lint": "biome lint --write",

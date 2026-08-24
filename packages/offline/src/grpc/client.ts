@@ -3,7 +3,7 @@ import { EmptySchema } from "@bufbuild/protobuf/wkt";
 import { type Client, createClient, type Interceptor } from "@connectrpc/connect";
 import { createGrpcWebTransport } from "@connectrpc/connect-web";
 import { GM_getValue, GM_setValue } from "vite-plugin-monkey/dist/client";
-import { getConfig } from "@/config";
+import { type AppConfig, getConfig } from "@/config";
 import {
   AddOfflineFileRequestSchema,
   type CloudAPI,
@@ -24,9 +24,14 @@ import {
   OfflineQuotaRequestSchema,
   RemoveOfflineFilesRequestSchema,
 } from "@/proto/clouddrive_pb";
+import { assertFileOperationSuccess } from "./fileOperation";
 import gmFetch from "./gmFetch";
 
-type CloudContext = { cloudName: string; cloudAccountId: string; path?: string };
+type CloudContext = {
+  cloudName: string;
+  cloudAccountId: string;
+  path?: string;
+};
 type StoredCloudContext = CloudContext & { scope: string };
 const CLOUD_CONTEXT_CACHE_KEY = "cd2_cloud_context_v1";
 let cloudContextCache: StoredCloudContext | undefined;
@@ -37,8 +42,8 @@ function getCloudContextScope(path: string): string {
   return `${cfg.grpcBaseUrl}\n${cfg.apiToken}\n${path}`;
 }
 
-function getCloudDriveClient(): Client<typeof CloudDriveFileSrv> {
-  const cfg = getConfig();
+function getCloudDriveClient(configOverride?: AppConfig): Client<typeof CloudDriveFileSrv> {
+  const cfg = configOverride ?? getConfig();
   const authInterceptor: Interceptor = (next) => async (req) => {
     const token = cfg.apiToken;
     if (token) {
@@ -61,8 +66,12 @@ function getCloudDriveClient(): Client<typeof CloudDriveFileSrv> {
  * @param urls 支持多个 URL, 用换行符分隔
  * @param destPath 目标路径
  */
-export async function addOffline(urls: string, destPath: string): Promise<FileOperationResult> {
-  const cfg = getConfig();
+export async function addOffline(
+  urls: string,
+  destPath: string,
+  configOverride?: AppConfig,
+): Promise<FileOperationResult> {
+  const cfg = configOverride ?? getConfig();
   const toFolder = destPath && destPath.length > 0 ? destPath : cfg.offlineDestPath;
 
   const req = create(AddOfflineFileRequestSchema, {
@@ -70,9 +79,9 @@ export async function addOffline(urls: string, destPath: string): Promise<FileOp
     toFolder,
   });
 
-  const client = getCloudDriveClient();
+  const client = getCloudDriveClient(cfg);
   const res = await client.addOfflineFiles(req);
-  return res;
+  return assertFileOperationSuccess(res, "CloudDrive2 添加离线任务失败");
 }
 
 export type SubmitOfflineResult = {
@@ -82,14 +91,23 @@ export type SubmitOfflineResult = {
   error?: unknown;
 };
 
-export async function submitOffline(urls: string, destPath: string): Promise<SubmitOfflineResult> {
+export async function submitOffline(
+  urls: string,
+  destPath: string,
+  configOverride?: AppConfig,
+): Promise<SubmitOfflineResult> {
   try {
-    await addOffline(urls, destPath);
+    await addOffline(urls, destPath, configOverride);
     return { ok: true };
   } catch (err) {
     const errMsg = (err as Error)?.message || "";
     if (errMsg.includes("任务已存在")) {
-      return { ok: false, alreadyExists: true, errorMessage: errMsg, error: err };
+      return {
+        ok: false,
+        alreadyExists: true,
+        errorMessage: errMsg,
+        error: err,
+      };
     }
     return { ok: false, errorMessage: errMsg, error: err };
   }
@@ -155,7 +173,12 @@ async function resolveCloudContext(pathOverride?: string): Promise<CloudContext>
 export async function listAllOfflineFiles(page = 1, pathOverride?: string): Promise<OfflineFileListAllResult> {
   const client = getCloudDriveClient();
   const { cloudName, cloudAccountId, path } = await resolveCloudContext(pathOverride);
-  const req = create(OfflineFileListAllRequestSchema, { cloudName, cloudAccountId, page, path });
+  const req = create(OfflineFileListAllRequestSchema, {
+    cloudName,
+    cloudAccountId,
+    page,
+    path,
+  });
   return await client.listAllOfflineFiles(req);
 }
 
@@ -163,7 +186,11 @@ export async function listAllOfflineFiles(page = 1, pathOverride?: string): Prom
 export async function getOfflineQuotaInfo(pathOverride?: string): Promise<OfflineQuotaInfo> {
   const client = getCloudDriveClient();
   const { cloudName, cloudAccountId, path } = await resolveCloudContext(pathOverride);
-  const req = create(OfflineQuotaRequestSchema, { cloudName, cloudAccountId, path });
+  const req = create(OfflineQuotaRequestSchema, {
+    cloudName,
+    cloudAccountId,
+    path,
+  });
   return await client.getOfflineQuotaInfo(req);
 }
 
@@ -178,8 +205,15 @@ export async function getMountPoints(): Promise<MountPoint[]> {
 export async function removeOfflineFilesBulk(infoHashes: string[], deleteFiles: boolean, pathOverride?: string) {
   const client = getCloudDriveClient();
   const { cloudName, cloudAccountId, path } = await resolveCloudContext(pathOverride);
-  const req = create(RemoveOfflineFilesRequestSchema, { cloudName, cloudAccountId, deleteFiles, infoHashes, path });
-  return await client.removeOfflineFiles(req);
+  const req = create(RemoveOfflineFilesRequestSchema, {
+    cloudName,
+    cloudAccountId,
+    deleteFiles,
+    infoHashes,
+    path,
+  });
+  const result = await client.removeOfflineFiles(req);
+  return assertFileOperationSuccess(result, "CloudDrive2 删除离线任务失败");
 }
 
 /** 通过 CloudDrive2 删除一个或多个云端文件/目录（进入对应云盘回收站）。 */
@@ -191,8 +225,7 @@ export async function deleteCloudFiles(paths: string[]): Promise<FileOperationRe
     uniquePaths.length === 1
       ? await client.deleteFile(create(FileRequestSchema, { path: uniquePaths[0] }))
       : await client.deleteFiles(create(MultiFileRequestSchema, { path: uniquePaths }));
-  if (!result.success) throw new Error(result.errorMessage || "CloudDrive2 删除文件失败");
-  return result;
+  return assertFileOperationSuccess(result, "CloudDrive2 删除文件失败");
 }
 
 /**
@@ -327,7 +360,9 @@ export function subscribePushMessage(
   const connect = async () => {
     if (signal.aborted) return;
     try {
-      for await (const msg of client.pushMessage(create(EmptySchema, {}), { signal })) {
+      for await (const msg of client.pushMessage(create(EmptySchema, {}), {
+        signal,
+      })) {
         if (
           msg.messageType === CloudDrivePushMessage_MessageType.DOWNLOADER_COUNT ||
           msg.messageType === CloudDrivePushMessage_MessageType.FILE_SYSTEM_CHANGE

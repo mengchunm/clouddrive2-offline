@@ -8,25 +8,16 @@ import {
 	CloudDrivePushMessage_MessageType,
 } from "../../offline/src/proto/clouddrive_pb";
 import { arrayBufferToBase64, base64ToArrayBuffer } from "./compat/base64";
-import {
-	clearMediaCache,
-	getMediaCacheStats,
-	registerMediaCache,
-	registerMediaCacheFetchHandler,
-} from "./media-cache";
 import type {
-	ClearMediaCacheMessage,
 	FetchProxyMessage,
 	FetchProxyResponse,
 	MarkTaskRootDeletedMessage,
-	MediaCacheStatsMessage,
 	NativeStatusMessage,
 	NativeUninstallMessage,
 	OpenLocalPathMessage,
 	OpenLocalPathResponse,
 	OpenOptionsMessage,
 	PlayPotPlayerPlaylistMessage,
-	RegisterMediaCacheMessage,
 	TrackTaskRootMessage,
 } from "./protocol";
 
@@ -35,6 +26,9 @@ const NATIVE_REQUEST_TIMEOUT = 15_000;
 const CONFIG_KEY = "cd2_config_v1";
 const PUSH_PORT_NAME = "cd2-push-events";
 const TRACKED_ROOTS_KEY = "cd2_tracked_task_roots_v1";
+const LEGACY_MEDIA_CACHE_DATABASE = "cd2-media-range-cache-v1";
+const LEGACY_MEDIA_CACHE_SETTING = "cd2_media_cache_enabled";
+const LEGACY_MEDIA_CACHE_CLEANUP_KEY = "cd2_legacy_media_cache_removed_v1";
 type TrackedRoot = {
 	taskKey: string;
 	fileId: string;
@@ -59,7 +53,21 @@ let nativePort: chrome.runtime.Port | undefined;
 let nativeRequestSequence = 0;
 const pendingNativeRequests = new Map<string, PendingNativeRequest>();
 
-registerMediaCacheFetchHandler();
+async function cleanupLegacyMediaCache(): Promise<void> {
+	const stored = await chrome.storage.local.get(LEGACY_MEDIA_CACHE_CLEANUP_KEY);
+	if (stored[LEGACY_MEDIA_CACHE_CLEANUP_KEY] === true) return;
+	const removed = await new Promise<boolean>((resolve) => {
+		const request = indexedDB.deleteDatabase(LEGACY_MEDIA_CACHE_DATABASE);
+		request.onsuccess = () => resolve(true);
+		request.onerror = () => resolve(false);
+		request.onblocked = () => resolve(false);
+	});
+	if (!removed) return;
+	await chrome.storage.local.remove(LEGACY_MEDIA_CACHE_SETTING);
+	await chrome.storage.local.set({ [LEGACY_MEDIA_CACHE_CLEANUP_KEY]: true });
+}
+
+void cleanupLegacyMediaCache();
 
 const trackedRootsReady = chrome.storage.local
 	.get(TRACKED_ROOTS_KEY)
@@ -363,10 +371,7 @@ chrome.runtime.onMessage.addListener(
 			| OpenLocalPathMessage
 			| PlayPotPlayerPlaylistMessage
 			| NativeStatusMessage
-			| NativeUninstallMessage
-			| RegisterMediaCacheMessage
-			| MediaCacheStatsMessage
-			| ClearMediaCacheMessage,
+			| NativeUninstallMessage,
 		_sender,
 		sendResponse,
 	) => {
@@ -415,36 +420,6 @@ chrome.runtime.onMessage.addListener(
 		}
 		if (message?.type === "cd2-fetch") {
 			void proxyFetch(message).then(sendResponse);
-			return true;
-		}
-		if (message?.type === "cd2-register-media-cache") {
-			void registerMediaCache(message).then(sendResponse);
-			return true;
-		}
-		if (message?.type === "cd2-media-cache-stats") {
-			void getMediaCacheStats()
-				.then(sendResponse)
-				.catch((error: unknown) =>
-					sendResponse({
-						ok: false,
-						totalBytes: 0,
-						maxBytes: 0,
-						error: error instanceof Error ? error.message : String(error),
-					}),
-				);
-			return true;
-		}
-		if (message?.type === "cd2-media-cache-clear") {
-			void clearMediaCache()
-				.then(sendResponse)
-				.catch((error: unknown) =>
-					sendResponse({
-						ok: false,
-						totalBytes: 0,
-						maxBytes: 0,
-						error: error instanceof Error ? error.message : String(error),
-					}),
-				);
 			return true;
 		}
 		if (message?.type === "cd2-open-local-path") {

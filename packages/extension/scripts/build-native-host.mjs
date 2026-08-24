@@ -33,6 +33,15 @@ const installer = [
 	"",
 ].join("\r\n");
 
+const publicDirectory = path.join(root, "public");
+if (
+	path.dirname(outputDir) !== publicDirectory ||
+	path.basename(outputDir) !== "native-host"
+) {
+	throw new Error(
+		`Refusing to clean unexpected Native Host output path: ${outputDir}`,
+	);
+}
+rmSync(outputDir, { recursive: true, force: true });
 mkdirSync(outputDir, { recursive: true });
-rmSync(path.join(outputDir, "clouddrive2-native-host.ps1"), { force: true });
 writeFileSync(outputFile, installer, "utf8");

@@ -183,7 +183,9 @@ SubRip 字幕测试
 		const [result, packets] = await libav.ff_read_frame_multi(
 			formatContext,
 			packet,
-			{ limit: 256 * 1024 },
+			{
+				limit: 256 * 1024,
+			},
 		);
 		for (const stream of subtitleStreams) {
 			subtitlePackets.get(stream.index).push(...(packets[stream.index] ?? []));

@@ -9,7 +9,6 @@ on:
     branches:
       - main
       - develop
-    types: [review_requested, ready_for_review]
 
 env:
   NODE_VERSION: "24"
@@ -63,3 +62,26 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+  native-host:
+    name: Windows Native Host
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test Native Messaging host
+        run: pnpm --filter clouddrive2-browser-extension run test:native-host

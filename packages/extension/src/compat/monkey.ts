@@ -1,6 +1,8 @@
 import type {
+	CommandStateResponse,
 	FetchProxyMessage,
 	FetchProxyResponse,
+	GetCommandStateMessage,
 	RunCommandMessage,
 } from "../protocol";
 import { arrayBufferToBase64, base64ToArrayBuffer } from "./base64";
@@ -202,13 +204,33 @@ export function GM_xmlhttpRequest(options: RequestOptions): { abort(): void } {
 }
 
 export function registerExtensionCommandBridge(): void {
-	chrome.runtime.onMessage.addListener((message: RunCommandMessage) => {
-		if (message?.type !== "cd2-run-command") return;
-		const command = [...menuCommands.entries()].find(([title]) =>
-			title.startsWith(message.titlePrefix),
+	const commandPrefixes: Record<RunCommandMessage["command"], string> = {
+		"danmu-api": "⚙ 弹幕 API 配置",
+		"danmu-mode": "🔄 弹幕模式",
+		"close-player": "关闭播放器",
+	};
+	const findCommand = (command: RunCommandMessage["command"]) => {
+		const titlePrefix = commandPrefixes[command];
+		return [...menuCommands.entries()].find(([title]) =>
+			title.startsWith(titlePrefix),
 		);
-		if (!command) return { ok: false, error: "当前页面尚未注册该功能" };
-		command[1]();
-		return { ok: true };
-	});
+	};
+
+	chrome.runtime.onMessage.addListener(
+		(message: RunCommandMessage | GetCommandStateMessage) => {
+			if (message?.type === "cd2-get-command-state") {
+				return {
+					ok: true,
+					availableCommands: (
+						Object.keys(commandPrefixes) as RunCommandMessage["command"][]
+					).filter((command) => Boolean(findCommand(command))),
+				} satisfies CommandStateResponse;
+			}
+			if (message?.type !== "cd2-run-command") return;
+			const command = findCommand(message.command);
+			if (!command) return { ok: false, error: "当前页面尚未注册该功能" };
+			command[1]();
+			return { ok: true };
+		},
+	);
 }

@@ -2,7 +2,10 @@ const CONFIG_KEY = "cd2_config_v1";
 const SHOW_PANEL_KEY = "cd2_show_panel";
 const LOCAL_DIRECTORY_KEY = "cd2_local_directory_enabled";
 const SHOW_DANMAKU_HEATMAP_KEY = "cd2_show_danmaku_heatmap";
-const MEDIA_CACHE_ENABLED_KEY = "cd2_media_cache_enabled";
+const PREFERRED_PLAYER_KEY = "cd2_default_player";
+const DANMU_MODE_KEY = "danmu_mode";
+const DANMU_API_URL_KEY = "danmu_api_url";
+const DEFAULT_DANMU_API_URL = "https://clouddrive2.netlify.app/87076677";
 const MIN_NATIVE_PROTOCOL = 8;
 const INSTALLER_FILENAME =
 	"CloudDrive2Offline/clouddrive2-native-host-installer.cmd";
@@ -12,56 +15,85 @@ const nativeStatus = document.querySelector("#nativeStatus");
 const downloadNativeInstaller = document.querySelector(
 	"#downloadNativeInstaller",
 );
+const downloadNativeInstallerLabel = document.querySelector(
+	"#downloadNativeInstallerLabel",
+);
+const refreshNativeHost = document.querySelector("#refreshNativeHost");
 const uninstallNativeHost = document.querySelector("#uninstallNativeHost");
-const mediaCacheEnabled = document.querySelector("#mediaCacheEnabled");
-const mediaCacheStatus = document.querySelector("#mediaCacheStatus");
-const clearMediaCache = document.querySelector("#clearMediaCache");
+const uninstallConfirm = document.querySelector("#uninstallConfirm");
+const saveSettings = document.querySelector("#saveSettings");
+const grpcBaseUrl = document.querySelector("#grpcBaseUrl");
+const apiToken = document.querySelector("#apiToken");
+const offlineDestPath = document.querySelector("#offlineDestPath");
+const showPanel = document.querySelector("#showPanel");
+const showDanmakuHeatmap = document.querySelector("#showDanmakuHeatmap");
+const defaultPlayer = document.querySelector("#defaultPlayer");
+const danmuMode = document.querySelector("#danmuMode");
+const danmuApiUrl = document.querySelector("#danmuApiUrl");
+const danmuApiUrlError = document.querySelector("#danmuApiUrlError");
 let nativeState = "checking";
 let nativeRefreshPromise = null;
+let savedSnapshot = "";
+let saving = false;
 
-function setSaveStatus(text) {
+function setSaveStatus(text, tone = "") {
 	saveStatus.textContent = text;
+	saveStatus.dataset.tone = tone;
 }
 
-function formatBytes(value) {
-	if (!Number.isFinite(value) || value <= 0) return "0 MB";
-	if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(2)} GB`;
-	return `${(value / 1024 ** 2).toFixed(1)} MB`;
+function readFormState() {
+	return {
+		config: {
+			grpcBaseUrl: grpcBaseUrl.value.trim().replace(/\/+$/, ""),
+			apiToken: apiToken.value.trim(),
+			offlineDestPath: offlineDestPath.value.trim() || "/",
+		},
+		showPanel: showPanel.checked,
+		showDanmakuHeatmap: showDanmakuHeatmap.checked,
+		defaultPlayer: defaultPlayer.value,
+		danmuMode: danmuMode.value,
+		danmuApiUrl: danmuApiUrl.value.trim().replace(/\/+$/, ""),
+	};
 }
 
-async function refreshMediaCacheStats() {
-	try {
-		const result = await chrome.runtime.sendMessage({
-			type: "cd2-media-cache-stats",
-		});
-		if (!result?.ok) throw new Error(result?.error || "统计失败");
-		mediaCacheStatus.textContent = `${formatBytes(result.totalBytes)} / ${formatBytes(result.maxBytes)}`;
-		mediaCacheStatus.dataset.tone = "ready";
-	} catch (error) {
-		mediaCacheStatus.textContent = "统计失败";
-		mediaCacheStatus.dataset.tone = "error";
+function currentSnapshot() {
+	return JSON.stringify(readFormState());
+}
+
+function updateSaveButton() {
+	saveSettings.disabled =
+		saving || !form.checkValidity() || currentSnapshot() === savedSnapshot;
+	form.setAttribute("aria-busy", saving ? "true" : "false");
+}
+
+function validateDanmuApiUrl() {
+	const value = danmuApiUrl.value.trim();
+	let error = "";
+	if (value) {
+		try {
+			const parsed = new URL(value);
+			if (!["http:", "https:"].includes(parsed.protocol))
+				error = "仅支持 HTTP 或 HTTPS 地址";
+		} catch {
+			error = "请输入完整的 HTTP 或 HTTPS 地址";
+		}
 	}
+	danmuApiUrl.setCustomValidity(error);
+	if (error) danmuApiUrl.setAttribute("aria-invalid", "true");
+	else danmuApiUrl.removeAttribute("aria-invalid");
+	danmuApiUrlError.textContent = error;
+	return !error;
 }
 
-clearMediaCache.addEventListener("click", async () => {
-	clearMediaCache.disabled = true;
-	clearMediaCache.classList.add("is-busy");
-	mediaCacheStatus.textContent = "正在清理…";
-	mediaCacheStatus.dataset.tone = "checking";
-	try {
-		const result = await chrome.runtime.sendMessage({
-			type: "cd2-media-cache-clear",
-		});
-		if (!result?.ok) throw new Error(result?.error || "清理失败");
-		await refreshMediaCacheStats();
-	} catch (error) {
-		mediaCacheStatus.textContent = "清理失败";
-		mediaCacheStatus.dataset.tone = "error";
-	} finally {
-		clearMediaCache.disabled = false;
-		clearMediaCache.classList.remove("is-busy");
-	}
-});
+function bindSecretToggle(buttonId, input) {
+	const button = document.querySelector(buttonId);
+	button.addEventListener("click", () => {
+		const visible = input.type === "password";
+		input.type = visible ? "text" : "password";
+		button.textContent = visible ? "隐藏" : "显示";
+		button.setAttribute("aria-pressed", String(visible));
+	});
+}
 
 function setNativeStatus(text, tone = "checking") {
 	nativeStatus.textContent = text;
@@ -70,6 +102,7 @@ function setNativeStatus(text, tone = "checking") {
 
 function setNativeActionsBusy(busy) {
 	downloadNativeInstaller.disabled = busy;
+	refreshNativeHost.disabled = busy;
 	uninstallNativeHost.disabled =
 		busy || !["ready", "outdated"].includes(nativeState);
 	downloadNativeInstaller.classList.toggle("is-busy", busy);
@@ -116,8 +149,8 @@ async function detectNativeHost() {
 
 function renderNativeState(state) {
 	nativeState = state;
-	downloadNativeInstaller.textContent =
-		state === "ready" ? "重新下载脚本" : "下载脚本";
+	downloadNativeInstallerLabel.textContent =
+		state === "ready" ? "重新下载" : "下载助手";
 	if (state === "ready") setNativeStatus("已安装，可定位本地文件", "ready");
 	else if (state === "checking") setNativeStatus("正在检测…", "checking");
 	else if (state === "outdated")
@@ -215,7 +248,7 @@ downloadNativeInstaller.addEventListener("click", async () => {
 	}
 });
 
-uninstallNativeHost.addEventListener("click", async () => {
+async function uninstallNativeHostNow() {
 	setNativeStatus("正在卸载…", "checking");
 	setNativeActionsBusy(true);
 	try {
@@ -234,51 +267,96 @@ uninstallNativeHost.addEventListener("click", async () => {
 	} finally {
 		setNativeActionsBusy(false);
 	}
+}
+
+refreshNativeHost.addEventListener("click", () => void refreshNativeState());
+uninstallNativeHost.addEventListener("click", () => {
+	uninstallConfirm.returnValue = "";
+	uninstallConfirm.showModal();
+});
+uninstallConfirm.addEventListener("close", () => {
+	if (uninstallConfirm.returnValue === "uninstall")
+		void uninstallNativeHostNow();
 });
 
 async function loadSettings() {
-	const stored = await chrome.storage.local.get([
-		CONFIG_KEY,
-		SHOW_PANEL_KEY,
-		SHOW_DANMAKU_HEATMAP_KEY,
-		MEDIA_CACHE_ENABLED_KEY,
-	]);
-	const config = stored[CONFIG_KEY] || {};
-	document.querySelector("#grpcBaseUrl").value =
-		config.grpcBaseUrl || "http://localhost:19798";
-	document.querySelector("#apiToken").value = config.apiToken || "";
-	document.querySelector("#offlineDestPath").value =
-		config.offlineDestPath || "/";
-	document.querySelector("#showPanel").checked = stored[SHOW_PANEL_KEY] ?? true;
-	document.querySelector("#showDanmakuHeatmap").checked =
-		stored[SHOW_DANMAKU_HEATMAP_KEY] ?? false;
-	mediaCacheEnabled.checked = stored[MEDIA_CACHE_ENABLED_KEY] ?? true;
-	await refreshMediaCacheStats();
-	await refreshNativeState();
+	try {
+		const stored = await chrome.storage.local.get([
+			CONFIG_KEY,
+			SHOW_PANEL_KEY,
+			SHOW_DANMAKU_HEATMAP_KEY,
+			PREFERRED_PLAYER_KEY,
+			DANMU_MODE_KEY,
+			DANMU_API_URL_KEY,
+		]);
+		const config = stored[CONFIG_KEY] || {};
+		grpcBaseUrl.value = config.grpcBaseUrl || "http://localhost:19798";
+		apiToken.value = config.apiToken || "";
+		offlineDestPath.value = config.offlineDestPath || "/";
+		showPanel.checked = stored[SHOW_PANEL_KEY] ?? true;
+		showDanmakuHeatmap.checked = stored[SHOW_DANMAKU_HEATMAP_KEY] ?? false;
+		defaultPlayer.value = ["web", "potplayer", "dandanplay", "infuse"].includes(
+			stored[PREFERRED_PLAYER_KEY],
+		)
+			? stored[PREFERRED_PLAYER_KEY]
+			: "web";
+		danmuMode.value = ["direct", "auto", "api"].includes(stored[DANMU_MODE_KEY])
+			? stored[DANMU_MODE_KEY]
+			: "direct";
+		danmuApiUrl.value = stored[DANMU_API_URL_KEY] ?? DEFAULT_DANMU_API_URL;
+		validateDanmuApiUrl();
+		savedSnapshot = currentSnapshot();
+		updateSaveButton();
+		await refreshNativeState();
+	} catch (error) {
+		setSaveStatus(`设置加载失败：${error.message || error}`, "error");
+	}
 }
+
+bindSecretToggle("#toggleApiTokenVisibility", apiToken);
+bindSecretToggle("#toggleDanmuApiVisibility", danmuApiUrl);
+saveSettings.disabled = true;
+
+form.addEventListener("input", (event) => {
+	if (event.target === danmuApiUrl) validateDanmuApiUrl();
+	setSaveStatus("");
+	updateSaveButton();
+});
+form.addEventListener("change", () => {
+	setSaveStatus("");
+	updateSaveButton();
+});
 
 window.addEventListener("focus", () => void refreshNativeState());
 
 form.addEventListener("submit", async (event) => {
 	event.preventDefault();
-	const config = {
-		grpcBaseUrl: document
-			.querySelector("#grpcBaseUrl")
-			.value.trim()
-			.replace(/\/+$/, ""),
-		apiToken: document.querySelector("#apiToken").value.trim(),
-		offlineDestPath:
-			document.querySelector("#offlineDestPath").value.trim() || "/",
-	};
-	await chrome.storage.local.set({
-		[CONFIG_KEY]: config,
-		[SHOW_PANEL_KEY]: document.querySelector("#showPanel").checked,
-		[SHOW_DANMAKU_HEATMAP_KEY]: document.querySelector("#showDanmakuHeatmap")
-			.checked,
-		[MEDIA_CACHE_ENABLED_KEY]: mediaCacheEnabled.checked,
-	});
-	setSaveStatus("设置已保存");
-	window.setTimeout(() => setSaveStatus(""), 2000);
+	if (!validateDanmuApiUrl() || !form.reportValidity()) return;
+
+	saving = true;
+	updateSaveButton();
+	setSaveStatus("正在保存…");
+	try {
+		const state = readFormState();
+		await chrome.storage.local.set({
+			[CONFIG_KEY]: state.config,
+			[SHOW_PANEL_KEY]: state.showPanel,
+			[SHOW_DANMAKU_HEATMAP_KEY]: state.showDanmakuHeatmap,
+			[PREFERRED_PLAYER_KEY]: state.defaultPlayer,
+			[DANMU_MODE_KEY]: state.danmuMode,
+			[DANMU_API_URL_KEY]: state.danmuApiUrl,
+		});
+		savedSnapshot = currentSnapshot();
+		setSaveStatus("设置已保存", "success");
+		window.setTimeout(() => {
+			if (saveStatus.textContent === "设置已保存") setSaveStatus("");
+		}, 2500);
+	} catch (error) {
+		setSaveStatus(`保存失败：${error.message || error}`, "error");
+	} finally {
+		saving = false;
+		updateSaveButton();
+	}
 });
 
 void loadSettings();

@@ -1,6 +1,101 @@
-:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
-body { width: 260px; margin: 0; padding: 16px; }
-h1 { margin: 0 0 6px; font-size: 17px; }
-p { margin: 0 0 12px; color: #888; font-size: 12px; }
-button { width: 100%; margin-top: 8px; padding: 8px 10px; border: 0; border-radius: 7px; cursor: pointer; }
-button:hover { filter: brightness(0.94); }
+:root {
+	color-scheme: light dark;
+	--font-sans:
+		-apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial,
+		sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+	--bg-popup: #ffffff;
+	--text-primary: #1f2328;
+	--text-secondary: #656d76;
+	--border-btn: #d0d7de;
+	--bg-btn: #f6f8fa;
+	--bg-btn-hover: #f3f4f6;
+	--bg-btn-active: #ebecf0;
+	--accent: #1677ff;
+	--accent-hover: #4096ff;
+	--accent-active: #0958d9;
+}
+
+@media (prefers-color-scheme: dark) {
+	:root {
+		--bg-popup: #161b22;
+		--text-primary: #e6edf3;
+		--text-secondary: #8d96a0;
+		--border-btn: #30363d;
+		--bg-btn: #21262d;
+		--bg-btn-hover: #30363d;
+		--bg-btn-active: #3c444d;
+	}
+}
+
+* {
+	box-sizing: border-box;
+}
+
+body {
+	width: 260px;
+	margin: 0;
+	padding: 16px;
+	background-color: var(--bg-popup);
+	color: var(--text-primary);
+	font-family: var(--font-sans);
+	-webkit-font-smoothing: antialiased;
+}
+
+h1 {
+	margin: 0 0 4px;
+	font-size: 15px;
+	font-weight: 600;
+	letter-spacing: -0.2px;
+}
+
+#status {
+	margin: 0 0 12px;
+	color: var(--text-secondary);
+	font-size: 12px;
+	line-height: 1.4;
+}
+
+button {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 100%;
+	height: 32px;
+	margin-top: 8px;
+	padding: 0 10px;
+	font-family: inherit;
+	font-size: 13px;
+	font-weight: 500;
+	color: var(--text-primary);
+	background-color: var(--bg-btn);
+	border: 1px solid var(--border-btn);
+	border-radius: 6px;
+	cursor: pointer;
+	transition: all 0.15s ease;
+	user-select: none;
+}
+
+button:hover {
+	background-color: var(--bg-btn-hover);
+	border-color: var(--border-btn);
+}
+
+button:active {
+	background-color: var(--bg-btn-active);
+}
+
+button[data-action="open-options"] {
+	background-color: var(--accent);
+	color: #ffffff;
+	border-color: var(--accent);
+}
+
+button[data-action="open-options"]:hover {
+	background-color: var(--accent-hover);
+	border-color: var(--accent-hover);
+}
+
+button[data-action="open-options"]:active {
+	background-color: var(--accent-active);
+	border-color: var(--accent-active);
+}

@@ -1,2 +1,30 @@
-export const CD2_ICON_BASE64 =
-  "data:image/png;base64,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";
+const STATIC_LOGO_SVG = `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120">
+  <defs>
+    <linearGradient id="cd2-base" gradientUnits="userSpaceOnUse" x1="0" y1="120" x2="120" y2="0">
+      <stop offset="0" stop-color="#50d8f3" />
+      <stop offset="0.56" stop-color="#2eabe3" />
+      <stop offset="1" stop-color="#1777c6" />
+    </linearGradient>
+    <radialGradient id="cd2-glow" gradientUnits="userSpaceOnUse" cx="21.6" cy="98.4" r="43.2">
+      <stop offset="0" stop-color="#fff" stop-opacity="0.18" />
+      <stop offset="1" stop-color="#fff" stop-opacity="0" />
+    </radialGradient>
+  </defs>
+  <circle cx="60" cy="60" r="60" fill="url(#cd2-base)" />
+  <circle cx="60" cy="60" r="60" fill="url(#cd2-glow)" />
+  <g>
+    <rect x="47" y="27" width="47" height="47" fill="url(#cd2-base)" />
+    <rect x="47" y="27" width="47" height="47" fill="url(#cd2-glow)" />
+    <rect x="50" y="30" width="41" height="41" fill="#fff" />
+    <rect x="28" y="53" width="40" height="40" fill="url(#cd2-base)" />
+    <rect x="28" y="53" width="40" height="40" fill="url(#cd2-glow)" />
+    <rect x="31" y="56" width="34" height="34" fill="#fff" />
+  </g>
+</svg>`;
+
+/** Static first frame of switching-squares-icon-v19-symmetric.html. */
+export const CD2_ICON_URL = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(STATIC_LOGO_SVG)}`;
+
+// Kept as an alias for existing integrations that imported the old constant name.
+export const CD2_ICON_BASE64 = CD2_ICON_URL;

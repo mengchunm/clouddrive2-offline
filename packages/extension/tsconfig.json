@@ -1,22 +1,22 @@
 {
-  "compilerOptions": {
-    "target": "ES2022",
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "jsx": "react-jsx",
-    "module": "ESNext",
-    "moduleResolution": "Bundler",
-    "allowSyntheticDefaultImports": true,
-    "esModuleInterop": true,
-    "forceConsistentCasingInFileNames": true,
-    "skipLibCheck": true,
-    "strict": true,
-    "types": ["chrome", "node", "tampermonkey"],
-    "baseUrl": ".",
-    "paths": {
-      "@/*": ["../offline/src/*"],
-      "artplayer-plugin-libass": ["src/compat/libass-plugin.ts"],
-      "vite-plugin-monkey/dist/client": ["src/compat/monkey.ts"]
-    }
-  },
-  "include": ["src", "../offline/src", "../artplayer/src", "vite.*.config.ts"]
+	"compilerOptions": {
+		"target": "ES2022",
+		"lib": ["ES2022", "DOM", "DOM.Iterable"],
+		"jsx": "react-jsx",
+		"module": "ESNext",
+		"moduleResolution": "Bundler",
+		"allowSyntheticDefaultImports": true,
+		"esModuleInterop": true,
+		"forceConsistentCasingInFileNames": true,
+		"skipLibCheck": true,
+		"strict": true,
+		"types": ["chrome", "node", "tampermonkey"],
+		"baseUrl": ".",
+		"paths": {
+			"@/*": ["../offline/src/*"],
+			"artplayer-plugin-libass": ["src/compat/libass-plugin.ts"],
+			"vite-plugin-monkey/dist/client": ["src/compat/monkey.ts"]
+		}
+	},
+	"include": ["src", "../offline/src", "../artplayer/src", "vite.*.config.ts"]
 }

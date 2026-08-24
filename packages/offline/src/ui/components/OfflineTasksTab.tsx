@@ -29,6 +29,7 @@ import {
   Dropdown,
   Flex,
   Input,
+  Pagination,
   Progress,
   Space,
   Table,
@@ -2975,8 +2976,8 @@ export function OfflineTasksTab() {
       : 0;
   return (
     <div className="cd2-task-list-layout">
-      <Flex align="center" justify="space-between" gap={8}>
-        <Space size={4}>
+      <Flex align="center" justify="space-between" gap={8} className="cd2-task-toolbar">
+        <Space size={4} className="cd2-task-toolbar-actions">
           <Button size="small" icon={<ReloadOutlined />} onClick={refreshManually} loading={refreshing}>
             {refreshing ? "刷新中" : "刷新"}
           </Button>
@@ -2986,43 +2987,34 @@ export function OfflineTasksTab() {
             </Button>
           ) : null}
         </Space>
-        {quota ? (
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            配额：{quota.left}/{quota.total}
-          </Typography.Text>
-        ) : null}
-      </Flex>
-
-      <Flex align="center" gap={6}>
-        <Input
-          allowClear
-          size="small"
-          prefix={<SearchOutlined />}
-          placeholder="输入任务名，空格分隔多个关键词"
-          value={searchText}
-          onChange={(event) => {
-            const value = event.target.value;
-            setSearchText(value);
-            if (!value) {
-              setSearchQuery("");
-              setSearchIndexing(false);
-              setSearchProgress(null);
-              changePage(1);
-            }
-          }}
-          onPressEnter={submitSearch}
-          style={{ flex: 1 }}
-        />
-        <Button
-          type="primary"
-          size="small"
-          icon={<SearchOutlined />}
-          loading={searchIndexing}
-          disabled={!searchText.trim()}
-          onClick={submitSearch}
-        >
-          搜索
-        </Button>
+        <Space.Compact size="small" style={{ width: 190, flexShrink: 0 }}>
+          <Input
+            allowClear
+            size="small"
+            placeholder="搜索任务..."
+            value={searchText}
+            onChange={(event) => {
+              const value = event.target.value;
+              setSearchText(value);
+              if (!value) {
+                setSearchQuery("");
+                setSearchIndexing(false);
+                setSearchProgress(null);
+                changePage(1);
+              }
+            }}
+            onPressEnter={submitSearch}
+          />
+          <Button
+            type="primary"
+            size="small"
+            icon={<SearchOutlined />}
+            loading={searchIndexing}
+            disabled={!searchText.trim()}
+            onClick={submitSearch}
+            title="搜索"
+          />
+        </Space.Compact>
       </Flex>
 
       {(searchIndexing || searchActive) && (
@@ -3079,6 +3071,7 @@ export function OfflineTasksTab() {
           tableLayout="fixed"
           rowSelection={rowSelection}
           scroll={{ x: 442, y: 1 }}
+          pagination={false}
           expandable={{
             expandedRowKeys: expandedTaskKeys,
             expandRowByClick: false,
@@ -3117,16 +3110,33 @@ export function OfflineTasksTab() {
               );
             },
           }}
-          pagination={{
-            current: page,
-            total,
-            pageSize: PAGE_SIZE,
-            size: "small",
-            showSizeChanger: false,
-            onChange: changePage,
-          }}
         />
       </div>
+
+      <Flex align="center" justify="space-between" className="cd2-task-footer-bar">
+        <div className="cd2-task-quota">
+          {quota ? (
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              配额：
+              <Typography.Text strong style={{ fontSize: 12 }}>
+                {quota.left}
+              </Typography.Text>{" "}
+              / {quota.total}
+            </Typography.Text>
+          ) : (
+            <span />
+          )}
+        </div>
+        <Pagination
+          current={page}
+          total={total}
+          pageSize={PAGE_SIZE}
+          size="small"
+          showSizeChanger={false}
+          onChange={changePage}
+          className="cd2-task-pagination"
+        />
+      </Flex>
     </div>
   );
 }

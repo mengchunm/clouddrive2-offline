@@ -12,6 +12,18 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const optionsSource = readFileSync(
+	path.join(root, "public", "options.js"),
+	"utf8",
+);
+const expectedProtocol = Number(
+	optionsSource.match(/const MIN_NATIVE_PROTOCOL = (\d+);/)?.[1],
+);
+if (!Number.isInteger(expectedProtocol)) {
+	throw new Error(
+		"Extension options do not declare a Native Host protocol version",
+	);
+}
 const installerCommand = path.join(
 	root,
 	"public",
@@ -121,7 +133,11 @@ function runHost(request) {
 
 try {
 	const ping = await runHost({ action: "ping", requestId: "ping-test" });
-	if (!ping.ok || ping.protocol !== 8 || ping.requestId !== "ping-test")
+	if (
+		!ping.ok ||
+		ping.protocol !== expectedProtocol ||
+		ping.requestId !== "ping-test"
+	)
 		throw new Error(`Unexpected ping: ${JSON.stringify(ping)}`);
 
 	const rejected = await runHost({

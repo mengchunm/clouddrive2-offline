@@ -27,7 +27,7 @@
 
 ### 播放与字幕
 
-任务面板派发 `cd2-play-video` → 扩展后台登记视频及 Range 元数据 → ArtPlayer 通过扩展源流地址打开视频 → IndexedDB 命中或 Range 读取远程容器 → 扫描外挂和内嵌字幕 → libav.js 解封装 → libass 或 WebVTT 渲染。
+任务面板派发 `cd2-play-video` → ArtPlayer 使用 CloudDrive2 原始直链打开视频 → Range Host 按需读取远程容器 → 扫描外挂和内嵌字幕 → libav.js 解封装 → libass 或 WebVTT 渲染。
 
 视频元素直接使用 CloudDrive2 原始 URL。音频兼容层与 libav 字幕通过非沙箱扩展页 `range-host.html` 读取 Range：该页面具有扩展 Host 权限，并用 MessageChannel 将 ArrayBuffer 转移给内容脚本。二者共享 1 MiB 对齐分块、64 MiB 内存 LRU 与进行中的请求。Manifest V3 后台 Service Worker 不能可靠地把扩展包内静态资源替换为动态媒体响应，因此禁止再使用 `media-cache-stream.bin` 一类占位文件作为视频、音频或字幕地址。
 
@@ -48,7 +48,7 @@ ArtPlayer 先使用浏览器原生 `<video>` 播放。扩展仅对 MKV 做音轨
 - 扩展设置和全局播放器偏好：`chrome.storage.local` 兼容层。
 - userscript 配置：GM storage。
 - 播放进度、播放列表等运行记忆：播放器 memory 层。
-- 扩展视频 Range 分片：扩展 Service Worker 的 IndexedDB；仅保存已经请求过的分片，使用独立容量上限和 LRU 清理。
+- 扩展音频和字幕 Range 分片：`range-host.html` 中的 64 MiB 内存 LRU；关闭页面后自然释放，不持久化整段媒体。
 
 不要把视频特定状态错误提升为全局偏好。字幕轨道、音轨、字幕时间偏移和全屏状态应保持视频级生命周期。
 

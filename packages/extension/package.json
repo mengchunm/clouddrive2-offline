@@ -14,12 +14,12 @@
 		"mediabunny": "1.51.0"
 	},
 	"scripts": {
-		"build:assets": "node scripts/build-native-host.mjs && node scripts/build-runtime-assets.mjs",
+		"build:assets": "node scripts/generate-brand-icons.mjs && node scripts/build-native-host.mjs && node scripts/build-runtime-assets.mjs",
 		"test:native-host": "node scripts/test-native-host.mjs",
 		"test:libav-mkv": "node scripts/test-libav-mkv.mjs",
 		"test:audio-fallback": "node scripts/test-audio-fallback.mjs",
 		"build": "pnpm run build:assets && vite build --config vite.content.config.ts && vite build --config vite.background.config.ts && vite build --config vite.libav-worker.config.ts && vite build --config vite.libav-host.config.ts && vite build --config vite.audio-host.config.ts && vite build --config vite.range-host.config.ts",
-		"ci": "biome ci src scripts vite.content.config.ts vite.background.config.ts vite.libav-worker.config.ts vite.libav-host.config.ts vite.audio-host.config.ts vite.range-host.config.ts",
+		"ci": "biome ci",
 		"typecheck": "tsc --noEmit"
 	},
 	"devDependencies": {

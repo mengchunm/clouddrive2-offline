@@ -220,8 +220,12 @@ if (
 if (
 	!controllerSource.includes("takeBrowserAudioFallbackPreparation(") ||
 	!controllerSource.includes("consumePreparation(") ||
-	!playerSource.includes("cachedPlayback.totalSize ?? fileSize") ||
-	!playerSource.includes("cachedPlayback.url") ||
+	!playerSource.includes(
+		"preloadBrowserAudioFallback(videoUrl, rememberedTime, fileSize, videoUrl)",
+	) ||
+	!playerSource.includes(
+		"takeBrowserAudioFallbackPreparation(url, restoreTime, fileSize, url)",
+	) ||
 	!offlineTasksSource.includes('new CustomEvent("cd2-preload-video-audio"') ||
 	!offlineTasksSource.includes("filePath: file.fullPathName") ||
 	!bridgeSource.includes("Number.isFinite(knownFileSize)")

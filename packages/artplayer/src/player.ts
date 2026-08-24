@@ -35,6 +35,8 @@ import {
 } from "./danmu-api";
 import { playlistMemory, subtitleMemory, videoMemory } from "./memory";
 import { assToWebVtt } from "./utils/assToVtt";
+import { extractKeyword, findBestEpisode } from "./utils/danmuMatch";
+import { getMediaIdentity, isMkvMedia } from "./utils/mediaIdentity";
 import { readMkvSubtitleTracks } from "./utils/mkvMetadata";
 import { extractMp4Subtitle } from "./utils/mp4Parser";
 
@@ -42,6 +44,7 @@ import { extractMp4Subtitle } from "./utils/mp4Parser";
 
 let currentPlayer: Artplayer | null = null;
 let overlayEl: HTMLDivElement | null = null;
+let _focusBeforePlayer: HTMLElement | null = null;
 let _saveProgressBeforeDestroy: (() => void) | null = null;
 let _cleanupBeforeDestroy: (() => void) | null = null;
 let _cleanupFloatingWindow: (() => void) | null = null;
@@ -74,68 +77,6 @@ function isCanceledExtensionRequest(error: unknown): boolean {
 	);
 }
 
-interface MediaCacheRegistrationResponse {
-	ok: boolean;
-	playbackUrl?: string;
-	cacheEnabled?: boolean;
-	totalSize?: number;
-	reason?: string;
-}
-
-const pendingMediaRegistrations = new Map<
-	string,
-	Promise<{ url: string; cacheEnabled: boolean; totalSize?: number }>
->();
-
-async function resolveCachedPlaybackUrl(
-	url: string,
-	filePath?: string,
-	fileName?: string,
-	fileSize?: number,
-): Promise<{ url: string; cacheEnabled: boolean; totalSize?: number }> {
-	if (!isExtensionBuild || !extensionRuntime?.sendMessage) {
-		return { url, cacheEnabled: false };
-	}
-	const sendMessage = extensionRuntime.sendMessage;
-	const registrationKey = filePath || url;
-	const pending = pendingMediaRegistrations.get(registrationKey);
-	if (pending) return pending;
-	const registration = (async () => {
-		try {
-			const response = await sendMessage<MediaCacheRegistrationResponse>({
-				type: "cd2-register-media-cache",
-				url,
-				cacheKey: registrationKey,
-				fileName,
-				fileSize,
-			});
-			if (response?.ok && response.cacheEnabled && response.playbackUrl) {
-				return {
-					// MV3 extension service workers do not proxy extension resource
-					// requests. Keep native video on CloudDrive2 and use the dedicated
-					// binary Range host for audio/subtitle compatibility reads.
-					url,
-					cacheEnabled: false,
-					totalSize: response.totalSize,
-				};
-			}
-			if (response?.reason) {
-				console.info("[cd2-artplayer] 视频分片缓存未启用:", response.reason);
-			}
-		} catch (error) {
-			if (!isCanceledExtensionRequest(error)) {
-				console.warn("[cd2-artplayer] 初始化视频分片缓存失败:", error);
-			}
-		}
-		return { url, cacheEnabled: false };
-	})();
-	pendingMediaRegistrations.set(registrationKey, registration);
-	return registration.finally(() => {
-		if (pendingMediaRegistrations.get(registrationKey) === registration) {
-			pendingMediaRegistrations.delete(registrationKey);
-		}
-	});
-}
 const extensionAsset = (path: string, fallback: string) =>
 	isExtensionBuild ? (extensionRuntime?.getURL?.(path) ?? path) : fallback;
 const LIBASS_WORKER_SCRIPT_URL = extensionAsset(
@@ -248,6 +189,9 @@ let _activeLibavSubtitle: ActiveLibavSubtitle | null = null;
 
 const CONTAINER_ID = "cd2-artplayer-container";
 const OVERLAY_ID = "cd2-artplayer-overlay";
+const OVERLAY_TITLE_ID = "cd2-artplayer-title";
+const DANMAKU_PANEL_ID = "cd2-danmaku-panel";
+const DANMAKU_PANEL_TITLE_ID = "cd2-danmaku-panel-title";
 const SHOW_DANMAKU_HEATMAP_KEY = "cd2_show_danmaku_heatmap";
 const DANMAKU_PREFERENCES_KEY = "cd2_danmaku_preferences_v1";
 const PLAYER_PREFERENCES_KEY = "cd2_player_preferences_v1";
@@ -257,22 +201,6 @@ const PLAYER_WINDOW_MARGIN = 12;
 const DEFAULT_PLAYER_ASPECT_RATIO = 16 / 9;
 const MIN_PLAYER_WINDOW_WIDTH = 480;
 const MIN_PLAYER_WINDOW_HEIGHT = 270;
-
-function getSubtitleVideoKey(
-	url: string,
-	filePath?: string,
-	fileName?: string,
-): string {
-	if (filePath?.trim()) return `path:${filePath.trim()}`;
-	try {
-		const parsed = new URL(url, window.location.href);
-		parsed.search = "";
-		parsed.hash = "";
-		return `url:${parsed.toString()}`;
-	} catch {
-		return `file:${fileName || url.split(/[?#]/, 1)[0]}`;
-	}
-}
 
 function subtitleIdentity(item: SubtitleSelectorItem): string {
 	if (!item.url && !item.mkvTrackId) return "off";
@@ -673,7 +601,8 @@ function injectStyles() {
       opacity: 0; transform: translateY(-8px); pointer-events: none;
       transition: opacity .2s ease, transform .2s ease;
     }
-    #${OVERLAY_ID} .cd2-player-header.cd2-player-header-visible {
+    #${OVERLAY_ID} .cd2-player-header.cd2-player-header-visible,
+    #${OVERLAY_ID} .cd2-player-header:focus-within {
       opacity: 1; transform: translateY(0); pointer-events: auto;
     }
     #${OVERLAY_ID}.cd2-player-window-dragging .cd2-player-header { cursor: grabbing; }
@@ -687,6 +616,9 @@ function injectStyles() {
       cursor: pointer; padding: 0; opacity: 0.7; transition: opacity 0.2s, background 0.2s; flex-shrink: 0;
     }
     #${OVERLAY_ID} .cd2-player-close:hover { opacity: 1; background: rgba(255,255,255,0.12); }
+    #${OVERLAY_ID} .cd2-player-close:focus-visible {
+      opacity: 1; outline: 2px solid #58a6ff; outline-offset: 2px;
+    }
     #${CONTAINER_ID} { width: 100%; height: 100%; min-height: 0; }
     #${CONTAINER_ID} .art-video-player { container-type: inline-size; }
     #${OVERLAY_ID} .cd2-player-resize-handle { position: absolute; z-index: 130; touch-action: none; }
@@ -722,7 +654,7 @@ function injectStyles() {
     /* 弹幕搜索浮层（在播放器内部） */
     .cd2-dm-panel {
       position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-      z-index: 110; background: rgba(0,0,0,0.96); border: 1px solid rgba(255,255,255,0.12);
+      z-index: 110; background: rgba(0,0,0,0.96); border: 1px solid rgba(255,255,255,0.32);
       border-radius: 10px; width: 450px; max-width: 90%; max-height: 70%;
       display: none; flex-direction: column; overflow: hidden;
       box-shadow: 0 12px 40px rgba(0,0,0,0.7); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -735,46 +667,53 @@ function injectStyles() {
       font-size: 14px; font-weight: 600;
     }
     .cd2-dm-panel .cd2-dm-header .cd2-dm-close-panel {
-      background: none; border: none; color: #fff; opacity: 0.5; cursor: pointer; font-size: 18px;
+      min-width: 32px; min-height: 32px; background: none; border: none;
+      color: #fff; opacity: 0.5; cursor: pointer; font-size: 18px;
     }
     .cd2-dm-panel .cd2-dm-header .cd2-dm-close-panel:hover { opacity: 1; }
     .cd2-dm-panel .cd2-dm-header .cd2-dm-mode-badge {
       font-size: 11px; padding: 2px 8px; border-radius: 4px; cursor: pointer;
-      background: rgba(22,119,255,0.2); color: #1677ff; border: 1px solid rgba(22,119,255,0.3);
-      transition: all 0.15s; white-space: nowrap; user-select: none;
+      background: rgba(88,166,255,0.18); color: #58a6ff; border: 1px solid rgba(88,166,255,0.48);
+      transition: all 0.15s; white-space: nowrap; user-select: none; font-family: inherit;
     }
     .cd2-dm-panel .cd2-dm-header .cd2-dm-mode-badge:hover {
-      background: rgba(22,119,255,0.35); border-color: rgba(22,119,255,0.5);
+      background: rgba(88,166,255,0.28); border-color: rgba(88,166,255,0.72);
     }
     .cd2-dm-panel .cd2-dm-search {
       display: flex; gap: 8px; padding: 10px 16px; border-bottom: 1px solid rgba(255,255,255,0.06);
     }
     .cd2-dm-panel .cd2-dm-search input {
-      flex: 1; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.18);
+      flex: 1; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.46);
       border-radius: 6px; padding: 8px 12px; color: #fff; font-size: 13px; outline: none;
     }
-    .cd2-dm-panel .cd2-dm-search input::placeholder { color: rgba(255,255,255,0.35); }
-    .cd2-dm-panel .cd2-dm-search input:focus { border-color: #1677ff; }
+    .cd2-dm-panel .cd2-dm-search input::placeholder { color: rgba(255,255,255,0.56); }
+    .cd2-dm-panel .cd2-dm-search input:focus { border-color: #58a6ff; }
     .cd2-dm-panel .cd2-dm-search button {
-      background: #1677ff; border: none; border-radius: 6px; padding: 8px 16px;
+      background: #0969da; border: none; border-radius: 6px; padding: 8px 16px;
       color: #fff; font-size: 13px; cursor: pointer; white-space: nowrap; font-weight: 500;
     }
-    .cd2-dm-panel .cd2-dm-search button:hover { background: #4096ff; }
+    .cd2-dm-panel .cd2-dm-search button:hover { background: #1f6feb; }
     .cd2-dm-panel .cd2-dm-body { overflow-y: auto; padding: 6px 0; flex: 1; }
     .cd2-dm-panel .cd2-dm-body::-webkit-scrollbar { width: 4px; }
     .cd2-dm-panel .cd2-dm-body::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 2px; }
     .cd2-dm-panel .cd2-dm-group { padding: 0 16px; margin-bottom: 6px; }
     .cd2-dm-panel .cd2-dm-group-title {
-      font-size: 13px; font-weight: 600; padding: 8px 0 4px; color: #1677ff;
+      font-size: 13px; font-weight: 600; padding: 8px 0 4px; color: #58a6ff;
     }
     .cd2-dm-panel .cd2-dm-ep {
-      font-size: 12px; padding: 7px 10px; margin: 2px 0; border-radius: 6px;
-      cursor: pointer; transition: all 0.15s; color: rgba(255,255,255,0.75);
+      display: block; width: 100%; font: inherit; font-size: 12px; text-align: left;
+      padding: 7px 10px; margin: 2px 0; border: 0; border-radius: 6px;
+      background: transparent; cursor: pointer; transition: all 0.15s; color: rgba(255,255,255,0.75);
     }
     .cd2-dm-panel .cd2-dm-ep:hover { background: rgba(255,255,255,0.08); color: #fff; }
-    .cd2-dm-panel .cd2-dm-ep.cd2-active { background: rgba(22,119,255,0.2); color: #1677ff; font-weight: 500; }
+    .cd2-dm-panel .cd2-dm-ep.cd2-active { background: rgba(88,166,255,0.2); color: #58a6ff; font-weight: 500; }
     .cd2-dm-panel .cd2-dm-status {
-      padding: 20px 16px; text-align: center; font-size: 12px; color: rgba(255,255,255,0.4);
+      padding: 20px 16px; text-align: center; font-size: 12px; color: rgba(255,255,255,0.56);
+      white-space: pre-line;
+    }
+    .cd2-dm-panel button:focus-visible,
+    .cd2-dm-panel input:focus-visible {
+      outline: 2px solid #45cbe7; outline-offset: 2px;
     }
   `;
 	document.head.appendChild(style);
@@ -784,19 +723,24 @@ function injectStyles() {
 
 function createDanmakuPanel(playerContainer: HTMLDivElement) {
 	const panel = document.createElement("div");
+	panel.id = DANMAKU_PANEL_ID;
 	panel.className = "cd2-dm-panel";
+	panel.tabIndex = -1;
+	panel.setAttribute("role", "dialog");
+	panel.setAttribute("aria-modal", "false");
+	panel.setAttribute("aria-labelledby", DANMAKU_PANEL_TITLE_ID);
 	panel.innerHTML = `
     <div class="cd2-dm-header">
-      <span>弹幕搜索</span>
-      <span class="cd2-dm-mode-badge" title="点击切换匹配模式">${getDanmuModeLabel()}</span>
-      <button class="cd2-dm-close-panel">✕</button>
+      <span id="${DANMAKU_PANEL_TITLE_ID}">弹幕搜索</span>
+      <button class="cd2-dm-mode-badge" type="button" title="点击切换匹配模式" aria-label="切换弹幕匹配模式">${getDanmuModeLabel()}</button>
+      <button class="cd2-dm-close-panel" type="button" aria-label="关闭弹幕搜索">✕</button>
     </div>
     <div class="cd2-dm-search">
-      <input type="text" placeholder="输入番剧名搜索..." />
-      <button>搜索</button>
+      <input type="text" aria-label="番剧名称" placeholder="输入番剧名搜索..." />
+      <button type="button" aria-label="搜索弹幕">搜索</button>
     </div>
     <div class="cd2-dm-body">
-      <div class="cd2-dm-status">等待自动匹配...</div>
+      <div class="cd2-dm-status" role="status">等待自动匹配...</div>
     </div>
   `;
 
@@ -815,17 +759,50 @@ function createDanmakuPanel(playerContainer: HTMLDivElement) {
 	const closeBtn = panel.querySelector<HTMLButtonElement>(
 		".cd2-dm-close-panel",
 	)!;
-
-	// 阻止键盘事件冒泡
-	panel.addEventListener("keydown", (e) => e.stopPropagation());
-	// 阻止点击关闭面板传播到播放器
-	panel.addEventListener("click", (e) => e.stopPropagation());
-
-	closeBtn.onclick = () => panel.classList.remove("cd2-show");
-
-	// 模式切换徽章
 	// biome-ignore lint/style/noNonNullAssertion: Guaranteed by DOM structure
-	const modeBadge = panel.querySelector<HTMLSpanElement>(".cd2-dm-mode-badge")!;
+	const modeBadge =
+		panel.querySelector<HTMLButtonElement>(".cd2-dm-mode-badge")!;
+	let returnFocus: HTMLElement | null = null;
+
+	const show = (trigger?: HTMLElement) => {
+		returnFocus =
+			trigger ??
+			(document.activeElement instanceof HTMLElement
+				? document.activeElement
+				: null);
+		panel.classList.add("cd2-show");
+		returnFocus?.setAttribute("aria-expanded", "true");
+		window.requestAnimationFrame(() => {
+			if (panel.classList.contains("cd2-show"))
+				input.focus({ preventScroll: true });
+		});
+	};
+	const hide = () => {
+		if (!panel.classList.contains("cd2-show")) return;
+		panel.classList.remove("cd2-show");
+		const focusTarget = returnFocus;
+		returnFocus?.setAttribute("aria-expanded", "false");
+		returnFocus = null;
+		window.requestAnimationFrame(() => {
+			if (focusTarget?.isConnected) focusTarget.focus({ preventScroll: true });
+		});
+	};
+	const toggle = (trigger?: HTMLElement) => {
+		if (panel.classList.contains("cd2-show")) hide();
+		else show(trigger);
+	};
+
+	panel.addEventListener("keydown", (event) => {
+		if (event.key === "Escape") {
+			event.preventDefault();
+			hide();
+		}
+		event.stopPropagation();
+	});
+	// 阻止点击关闭面板传播到播放器
+	panel.addEventListener("click", (event) => event.stopPropagation());
+	closeBtn.onclick = hide;
+
 	modeBadge.onclick = () => {
 		const newMode = cycleDanmuMode();
 		modeBadge.textContent = getDanmuModeLabel(newMode);
@@ -833,13 +810,19 @@ function createDanmakuPanel(playerContainer: HTMLDivElement) {
 			currentPlayer.notice.show = `弹幕模式已切换为: ${getDanmuModeLabel(newMode)}`;
 	};
 
-	const toggle = () => panel.classList.toggle("cd2-show");
-	const hide = () => panel.classList.remove("cd2-show");
-
 	return { panel, input, searchBtn, body, modeBadge, toggle, hide };
 }
 
 // ─── 渲染结果 ───────────────────────────────────────────
+
+function renderStatus(body: HTMLDivElement, message: string): void {
+	body.replaceChildren();
+	const status = document.createElement("div");
+	status.className = "cd2-dm-status";
+	status.setAttribute("role", "status");
+	status.textContent = message;
+	body.appendChild(status);
+}
 
 function renderMatches(
 	body: HTMLDivElement,
@@ -847,9 +830,9 @@ function renderMatches(
 	onSelect: (id: number, label: string) => void,
 	activeId?: number,
 ) {
-	body.innerHTML = "";
+	body.replaceChildren();
 	if (matches.length === 0) {
-		body.innerHTML = '<div class="cd2-dm-status">无匹配结果</div>';
+		renderStatus(body, "无匹配结果");
 		return;
 	}
 	const groups = new Map<string, MatchItem[]>();
@@ -864,9 +847,13 @@ function renderMatches(
 	for (const [title, items] of groups) {
 		const g = document.createElement("div");
 		g.className = "cd2-dm-group";
-		g.innerHTML = `<div class="cd2-dm-group-title">${title}</div>`;
+		const groupTitle = document.createElement("div");
+		groupTitle.className = "cd2-dm-group-title";
+		groupTitle.textContent = title;
+		g.appendChild(groupTitle);
 		for (const item of items) {
-			const el = document.createElement("div");
+			const el = document.createElement("button");
+			el.type = "button";
 			el.className = `cd2-dm-ep${item.episodeId === activeId ? " cd2-active" : ""}`;
 			el.textContent = item.episodeTitle;
 			el.onclick = () => onSelect(item.episodeId, item.episodeTitle);
@@ -882,18 +869,21 @@ function renderAnimes(
 	onSelect: (id: number, label: string) => void,
 	activeId?: number,
 ) {
-	body.innerHTML = "";
+	body.replaceChildren();
 	if (animes.length === 0) {
-		body.innerHTML =
-			'<div class="cd2-dm-status">无搜索结果，换个关键词试试</div>';
+		renderStatus(body, "无搜索结果，换个关键词试试");
 		return;
 	}
 	for (const anime of animes) {
 		const g = document.createElement("div");
 		g.className = "cd2-dm-group";
-		g.innerHTML = `<div class="cd2-dm-group-title">${anime.animeTitle}（${anime.typeDescription}）</div>`;
+		const groupTitle = document.createElement("div");
+		groupTitle.className = "cd2-dm-group-title";
+		groupTitle.textContent = `${anime.animeTitle}（${anime.typeDescription}）`;
+		g.appendChild(groupTitle);
 		for (const ep of anime.episodes) {
-			const el = document.createElement("div");
+			const el = document.createElement("button");
+			el.type = "button";
 			el.className = `cd2-dm-ep${ep.episodeId === activeId ? " cd2-active" : ""}`;
 			el.textContent = ep.episodeTitle;
 			el.onclick = () => onSelect(ep.episodeId, ep.episodeTitle);
@@ -906,16 +896,32 @@ function renderAnimes(
 // ─── 覆盖层 ─────────────────────────────────────────────
 
 function createOverlay(title: string) {
-	destroyPlayer();
+	const activeElement =
+		document.activeElement instanceof HTMLElement
+			? document.activeElement
+			: null;
+	const focusCandidate =
+		activeElement &&
+		activeElement !== document.body &&
+		activeElement !== document.documentElement &&
+		!overlayEl?.contains(activeElement)
+			? activeElement
+			: _focusBeforePlayer;
+	destroyPlayer(false);
+	_focusBeforePlayer = focusCandidate?.isConnected ? focusCandidate : null;
 	injectStyles();
 
 	const overlay = document.createElement("div");
 	overlay.id = OVERLAY_ID;
+	overlay.tabIndex = -1;
+	overlay.setAttribute("role", "dialog");
+	overlay.setAttribute("aria-labelledby", OVERLAY_TITLE_ID);
 
 	const header = document.createElement("div");
 	header.className = "cd2-player-header";
 
 	const titleEl = document.createElement("span");
+	titleEl.id = OVERLAY_TITLE_ID;
 	titleEl.className = "cd2-player-title";
 	titleEl.textContent = title;
 
@@ -924,7 +930,8 @@ function createOverlay(title: string) {
 	closeBtn.type = "button";
 	closeBtn.textContent = "✕";
 	closeBtn.title = "关闭播放器";
-	closeBtn.onclick = destroyPlayer;
+	closeBtn.setAttribute("aria-label", "关闭播放器");
+	closeBtn.onclick = () => destroyPlayer();
 
 	header.append(titleEl, closeBtn);
 
@@ -955,6 +962,18 @@ function createOverlay(title: string) {
 	const resizeBottomRight = document.createElement("div");
 	resizeBottomRight.className =
 		"cd2-player-resize-handle cd2-player-resize-corner cd2-player-resize-bottom-right";
+	for (const handle of [
+		resizeTop,
+		resizeRight,
+		resizeBottom,
+		resizeLeft,
+		resizeTopLeft,
+		resizeTopRight,
+		resizeBottomLeft,
+		resizeBottomRight,
+	]) {
+		handle.setAttribute("aria-hidden", "true");
+	}
 
 	overlay.append(
 		container,
@@ -1266,12 +1285,15 @@ function createOverlay(title: string) {
 		mountWindowChrome,
 		setChromeVisible,
 		setVideoAspectRatio,
+		focusInitial: () => closeBtn.focus({ preventScroll: true }),
 	};
 }
 
 // ─── 销毁 ───────────────────────────────────────────────
 
-export function destroyPlayer() {
+export function destroyPlayer(restoreFocus = true) {
+	const focusTarget = restoreFocus ? _focusBeforePlayer : null;
+	if (restoreFocus) _focusBeforePlayer = null;
 	_playerSessionNonce += 1;
 	if (_saveProgressBeforeDestroy) {
 		_saveProgressBeforeDestroy();
@@ -1294,6 +1316,9 @@ export function destroyPlayer() {
 		overlayEl = null;
 	}
 	clearPlayerReloadSession();
+	if (focusTarget?.isConnected) {
+		queueMicrotask(() => focusTarget.focus({ preventScroll: true }));
+	}
 }
 
 /** 仅在当前标签页发生刷新时恢复播放器；新开页面或普通跳转不会触发。 */
@@ -1345,17 +1370,15 @@ export function preloadPlayerAudio(
 	filePath?: string,
 	fileName?: string,
 ): void {
-	if (!isExtensionBuild || !/\.mkv(?:[?#].*)?$/i.test(videoUrl)) return;
-	const rememberedTime = Math.max(0, videoMemory.get(videoUrl)?.time ?? 0);
-	void resolveCachedPlaybackUrl(videoUrl, filePath, fileName, fileSize).then(
-		(cached) =>
-			preloadBrowserAudioFallback(
-				videoUrl,
-				rememberedTime,
-				cached.totalSize ?? fileSize,
-				cached.url,
-			),
+	if (!isExtensionBuild || !isMkvMedia(fileName, videoUrl)) return;
+	const mediaIdentity = getMediaIdentity(videoUrl, filePath, fileName);
+	const rememberedTime = Math.max(
+		0,
+		videoMemory.get(mediaIdentity)?.time ??
+			videoMemory.get(videoUrl)?.time ??
+			0,
 	);
+	preloadBrowserAudioFallback(videoUrl, rememberedTime, fileSize, videoUrl);
 }
 
 // ─── 加载弹幕到播放器 ───────────────────────────────────
@@ -1474,14 +1497,17 @@ export async function openPlayer(
 		mountWindowChrome,
 		setChromeVisible,
 		setVideoAspectRatio,
+		focusInitial,
 	} = createOverlay(displayTitle);
 	const sessionNonce = ++_playerSessionNonce;
-	_currentSubtitleVideoKey = getSubtitleVideoKey(url, filePath, fileName);
+	const isCurrentSession = () => sessionNonce === _playerSessionNonce;
+	const mediaIdentity = getMediaIdentity(url, filePath, fileName);
+	_currentSubtitleVideoKey = mediaIdentity;
 	_currentSubtitleIdentity = null;
 	_pendingSubtitleIdentity = null;
 	_autoSubtitleActivationBarrier = Promise.resolve();
 	const shouldUseBrowserAudioFallback =
-		isExtensionBuild && /\.mkv(?:[?#].*)?$/i.test(fileName);
+		isExtensionBuild && isMkvMedia(fileName, url);
 
 	// 弹幕状态文字（显示在控制栏）
 	let danmakuStatusText = "弹幕匹配中...";
@@ -1506,6 +1532,7 @@ export async function openPlayer(
 			const comments = useDirect
 				? await directFetchComments(episodeId)
 				: await fetchComments(episodeId);
+			if (!isCurrentSession()) return 0;
 			const danmaku = convertToArtDanmaku(comments.comments);
 			applyDanmaku(danmaku);
 			const source = useDirect ? "直连" : "API";
@@ -1522,6 +1549,7 @@ export async function openPlayer(
 			}
 			return danmaku.length;
 		} catch (err) {
+			if (!isCurrentSession()) return 0;
 			danmakuStatusText = "加载失败";
 			updateControlText();
 			if (currentPlayer)
@@ -1534,18 +1562,18 @@ export async function openPlayer(
 	const doSearch = async () => {
 		const kw = panelEls.input.value.trim();
 		if (!kw) return;
-		panelEls.body.innerHTML = '<div class="cd2-dm-status">搜索中...</div>';
+		renderStatus(panelEls.body, "搜索中...");
 		const searchMode = getDanmuMode();
 
 		// 仅API模式
 		if (searchMode === "api") {
 			if (!hasApiUrl()) {
-				panelEls.body.innerHTML =
-					'<div class="cd2-dm-status">未配置API地址，请先在油猴菜单中设置</div>';
+				renderStatus(panelEls.body, "未配置API地址，请先在油猴菜单中设置");
 				return;
 			}
 			try {
 				const res = await searchEpisodes(kw);
+				if (!isCurrentSession()) return;
 				renderAnimes(
 					panelEls.body,
 					res.animes,
@@ -1553,7 +1581,7 @@ export async function openPlayer(
 					_currentEpisodeId,
 				);
 			} catch (err) {
-				panelEls.body.innerHTML = `<div class="cd2-dm-status">搜索失败: ${(err as Error).message}</div>`;
+				renderStatus(panelEls.body, `搜索失败: ${(err as Error).message}`);
 			}
 			return;
 		}
@@ -1561,6 +1589,7 @@ export async function openPlayer(
 		// 直连模式 或 自动模式
 		try {
 			const res = await directSearchEpisodes(kw);
+			if (!isCurrentSession()) return;
 			renderAnimes(
 				panelEls.body,
 				res.animes,
@@ -1569,7 +1598,10 @@ export async function openPlayer(
 			);
 		} catch (directErr) {
 			if (searchMode === "direct") {
-				panelEls.body.innerHTML = `<div class="cd2-dm-status">直连搜索失败: ${(directErr as Error).message}</div>`;
+				renderStatus(
+					panelEls.body,
+					`直连搜索失败: ${(directErr as Error).message}`,
+				);
 				return;
 			}
 			// auto模式回退到API
@@ -1580,12 +1612,16 @@ export async function openPlayer(
 			if (hasApiUrl()) {
 				try {
 					const res = await searchEpisodes(kw);
+					if (!isCurrentSession()) return;
 					renderAnimes(panelEls.body, res.animes, onSelectEpisode);
 				} catch (apiErr) {
-					panelEls.body.innerHTML = `<div class="cd2-dm-status">搜索失败: ${(apiErr as Error).message}</div>`;
+					renderStatus(panelEls.body, `搜索失败: ${(apiErr as Error).message}`);
 				}
 			} else {
-				panelEls.body.innerHTML = `<div class="cd2-dm-status">搜索失败: ${(directErr as Error).message}</div>`;
+				renderStatus(
+					panelEls.body,
+					`搜索失败: ${(directErr as Error).message}`,
+				);
 			}
 		}
 	};
@@ -1629,7 +1665,30 @@ export async function openPlayer(
 			position: "right",
 			index: 15,
 			html: `<div style="display:flex;align-items:center;gap:4px;padding:0 6px;cursor:pointer">${DANMAKU_ICON}<span class="cd2-dm-ctrl-text" style="font-size:12px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">弹幕匹配中...</span></div>`,
-			click: () => panelEls.toggle(),
+			mounted: (element) => {
+				element.tabIndex = 0;
+				element.setAttribute("role", "button");
+				element.setAttribute("aria-label", "打开弹幕搜索");
+				element.setAttribute("aria-haspopup", "dialog");
+				element.setAttribute("aria-controls", DANMAKU_PANEL_ID);
+				element.setAttribute("aria-expanded", "false");
+				element.onkeydown = (event) => {
+					if (event.key !== "Enter" && event.key !== " ") return;
+					event.preventDefault();
+					event.stopPropagation();
+					panelEls.toggle(element);
+				};
+			},
+			beforeUnmount: (element) => {
+				element.onkeydown = null;
+			},
+			click: (_component, event) => {
+				panelEls.toggle(
+					event.currentTarget instanceof HTMLElement
+						? event.currentTarget
+						: undefined,
+				);
+			},
 		},
 	];
 
@@ -1648,6 +1707,7 @@ export async function openPlayer(
 			onSelect: (selector) => {
 				const item = selector as PlaylistSelectorItem;
 				const dispatchPlay = (videoUrl: string) => {
+					if (!isCurrentSession()) return;
 					Win.dispatchEvent(
 						new CustomEvent("cd2-play-video", {
 							detail: {
@@ -1736,26 +1796,16 @@ export async function openPlayer(
 
 	const danmakuPreferences = getDanmakuPreferences();
 	const playerPreferences = getPlayerPreferences();
-	const rememberedVideo = videoMemory.get(url);
+	const rememberedVideo =
+		videoMemory.get(mediaIdentity) ?? videoMemory.get(url);
 	const restoreTime = Math.max(
 		0,
 		restoreState?.time ?? rememberedVideo?.time ?? 0,
 	);
-	const cachedPlayback = await resolveCachedPlaybackUrl(
-		url,
-		filePath,
-		fileName,
-		fileSize,
-	);
 	// Audio and subtitles share the dedicated 1 MiB Range Host while native video
 	// remains directly connected to CloudDrive2 for the fastest first frame.
 	const audioFallbackPreparation = shouldUseBrowserAudioFallback
-		? takeBrowserAudioFallbackPreparation(
-				url,
-				restoreTime,
-				cachedPlayback.totalSize ?? fileSize,
-				cachedPlayback.url,
-			)
+		? takeBrowserAudioFallbackPreparation(url, restoreTime, fileSize, url)
 		: undefined;
 	_autoSubtitleActivationBarrier = audioFallbackPreparation
 		? settleWithin(audioFallbackPreparation.openResult, 3000)
@@ -1763,7 +1813,7 @@ export async function openPlayer(
 	if (sessionNonce !== _playerSessionNonce) return;
 	currentPlayer = new Artplayer({
 		container,
-		url: cachedPlayback.url,
+		url,
 		volume: restoreState?.volume ?? playerPreferences.volume,
 		autoplay: restoreState?.wasPlaying ?? true,
 		pip: true,
@@ -1807,7 +1857,7 @@ export async function openPlayer(
 		? new BrowserAudioFallback({
 				video: currentPlayer.video,
 				videoUrl: url,
-				audioSourceUrl: cachedPlayback.url,
+				audioSourceUrl: url,
 				preparation: audioFallbackPreparation,
 				notice: (message) => {
 					if (currentPlayer) currentPlayer.notice.show = message;
@@ -1838,6 +1888,7 @@ export async function openPlayer(
 	});
 	const playerRoot = currentPlayer.template.$player;
 	mountWindowChrome(playerRoot);
+	focusInitial();
 
 	// ArtPlayer 的左右控制栏会在窄窗口中互相挤压，最终把最右侧的真正全屏
 	// 按钮裁掉。根据播放器的实际宽度主动收纳按钮，保证核心操作严格按优先级保留。
@@ -1885,20 +1936,6 @@ export async function openPlayer(
 	updateResponsiveControls();
 	window.requestAnimationFrame(updateResponsiveControls);
 	const onPlayerControl = (visible: boolean) => setChromeVisible(visible);
-	let cacheFallbackUsed = false;
-	const onVideoError = () => {
-		const player = currentPlayer;
-		if (!player || !cachedPlayback.cacheEnabled || cacheFallbackUsed) return;
-		cacheFallbackUsed = true;
-		const fallbackTime = Math.max(0, player.currentTime || restoreTime);
-		player.notice.show = "本地视频缓存通道不可用，已切换为直接播放";
-		player.once("video:loadedmetadata", () => {
-			if (currentPlayer === player && fallbackTime > 0) {
-				player.currentTime = fallbackTime;
-			}
-		});
-		player.url = url;
-	};
 	const onVideoMetadata = () => {
 		const video = currentPlayer?.video;
 		if (video?.videoWidth && video.videoHeight) {
@@ -1906,7 +1943,6 @@ export async function openPlayer(
 		}
 	};
 	currentPlayer.on("control", onPlayerControl);
-	currentPlayer.on("video:error", onVideoError);
 	currentPlayer.on("video:loadedmetadata", onVideoMetadata);
 	onVideoMetadata();
 	currentPlayer.muted = restoreState?.muted ?? playerPreferences.muted;
@@ -1968,7 +2004,7 @@ export async function openPlayer(
 			const time = player.currentTime;
 			const duration = player.duration;
 			if (time > 0 && (!Number.isFinite(duration) || time < duration - 5)) {
-				videoMemory.set(url, {
+				videoMemory.set(mediaIdentity, {
 					time,
 					episodeId: _currentEpisodeId,
 					label: danmakuStatusText,
@@ -2045,7 +2081,6 @@ export async function openPlayer(
 		currentPlayer?.off("video:ratechange", savePlayerPreferences);
 		currentPlayer?.off("aspectRatio", savePlayerPreferences);
 		currentPlayer?.off("control", onPlayerControl);
-		currentPlayer?.off("video:error", onVideoError);
 		currentPlayer?.off("video:loadedmetadata", onVideoMetadata);
 		currentPlayer?.off("video:play", onPlaybackStateChange);
 		currentPlayer?.off("video:pause", onPlaybackStateChange);
@@ -2075,6 +2110,7 @@ export async function openPlayer(
 	if (filePath && _currentSubtitles.length === 0) {
 		resolveSubtitlesFromOffline(filePath)
 			.then((subs) => {
+				if (!isCurrentSession()) return;
 				_currentSubtitles = subs;
 				applySubtitles(_currentSubtitles);
 			})
@@ -2089,6 +2125,7 @@ export async function openPlayer(
 		.match(/\.([^.?#]+)(?:[?#]|$)/)?.[1];
 	if (mediaExtension === "mkv") {
 		extractMkvMetadata(url).then((mkvSubs) => {
+			if (!isCurrentSession()) return;
 			if (mkvSubs.length > 0) {
 				_mkvExtractedSubs.push(...mkvSubs);
 				applySubtitles(_currentSubtitles);
@@ -2102,6 +2139,10 @@ export async function openPlayer(
 	) {
 		extractMp4Subtitle(url, gmFetchAdapter)
 			.then((mp4Subs) => {
+				if (!isCurrentSession()) {
+					for (const subtitle of mp4Subs) URL.revokeObjectURL(subtitle.url);
+					return;
+				}
 				if (mp4Subs.length > 0) {
 					const subs = mp4Subs.map((s) => ({
 						url: s.url,
@@ -2131,13 +2172,16 @@ export async function openPlayer(
 		panelEls,
 		onSelectEpisode,
 		(text: string) => {
+			if (!isCurrentSession()) return;
 			danmakuStatusText = text;
 			updateControlText();
 		},
 		(animes: SearchAnime[], useDirect: boolean) => {
+			if (!isCurrentSession()) return;
 			_lastAnimes = animes;
 			_lastUseDirect = useDirect;
 		},
+		isCurrentSession,
 	);
 }
 
@@ -2932,7 +2976,9 @@ async function autoMatch(
 	onSelect: (id: number, label: string, useDirect?: boolean) => Promise<number>,
 	setStatus: (text: string) => void,
 	setLastAnimes: (animes: SearchAnime[], useDirect: boolean) => void,
+	isCurrent: () => boolean,
 ) {
+	if (!isCurrent()) return;
 	const keyword = extractKeyword(fileName);
 	if (keyword) panelEls.input.value = keyword;
 
@@ -2952,6 +2998,7 @@ async function autoMatch(
 			console.log("[cd2-artplayer] 直连策略1: 文件名匹配, fileName=", fileName);
 			setStatus("直连匹配中...");
 			const directMatchResult = await directMatchVideo(fileName);
+			if (!isCurrent()) return;
 
 			if (directMatchResult.isMatched && directMatchResult.matches.length > 0) {
 				const match = directMatchResult.matches[0];
@@ -2966,6 +3013,7 @@ async function autoMatch(
 					match.episodeTitle,
 					true,
 				);
+				if (!isCurrent()) return;
 				if (directCount <= 0 && mode === "auto") {
 					throw new Error("直连匹配成功但没有弹幕，回退到 API");
 				}
@@ -2977,6 +3025,7 @@ async function autoMatch(
 				console.log("[cd2-artplayer] 直连策略2: 关键词搜索, keyword=", keyword);
 				setStatus("直连搜索中...");
 				const directSearchResult = await directSearchEpisodes(keyword);
+				if (!isCurrent()) return;
 
 				if (directSearchResult.animes.length > 0) {
 					setLastAnimes(directSearchResult.animes, true);
@@ -3003,6 +3052,7 @@ async function autoMatch(
 					setStatus(
 						`直连找到 ${directSearchResult.animes.length} 部番剧，点击选集`,
 					);
+					if (!isCurrent()) return;
 					if (currentPlayer)
 						currentPlayer.notice.show =
 							"已搜索到番剧(直连)，请点击弹幕按钮选择集数";
@@ -3018,6 +3068,7 @@ async function autoMatch(
 					);
 					panelEls.input.value = shortKeyword;
 					const directRetryResult = await directSearchEpisodes(shortKeyword);
+					if (!isCurrent()) return;
 					if (directRetryResult.animes.length > 0) {
 						setLastAnimes(directRetryResult.animes, true);
 						const best = findBestEpisode(fileName, directRetryResult.animes);
@@ -3041,6 +3092,7 @@ async function autoMatch(
 						setStatus(
 							`直连找到 ${directRetryResult.animes.length} 部番剧，点击选集`,
 						);
+						if (!isCurrent()) return;
 						if (currentPlayer)
 							currentPlayer.notice.show =
 								"已搜索到番剧(直连)，请点击弹幕按钮选择集数";
@@ -3051,6 +3103,7 @@ async function autoMatch(
 
 			console.log("[cd2-artplayer] 直连弹弹Play代理未匹配到结果");
 		} catch (err) {
+			if (!isCurrent()) return;
 			console.warn(
 				"[cd2-artplayer] 直连弹弹Play代理失败:",
 				(err as Error).message,
@@ -3058,8 +3111,10 @@ async function autoMatch(
 			if (mode === "direct") {
 				// 仅直连模式，不回退
 				setStatus("直连匹配失败，点击搜索");
-				panelEls.body.innerHTML =
-					'<div class="cd2-dm-status">直连匹配失败<br><br>可手动输入番剧名搜索<br>或切换到「自动」模式以启用API后备</div>';
+				renderStatus(
+					panelEls.body,
+					"直连匹配失败\n\n可手动输入番剧名搜索\n或切换到「自动」模式以启用API后备",
+				);
 				if (currentPlayer)
 					currentPlayer.notice.show = "直连匹配失败，可点击弹幕按钮手动搜索";
 				return;
@@ -3069,8 +3124,10 @@ async function autoMatch(
 		// 仅直连模式且未匹配到
 		if (mode === "direct") {
 			setStatus("未找到弹幕，点击搜索");
-			panelEls.body.innerHTML =
-				'<div class="cd2-dm-status">直连未匹配到结果<br><br>可手动输入番剧名搜索<br>或切换到「自动」模式以启用API后备</div>';
+			renderStatus(
+				panelEls.body,
+				"直连未匹配到结果\n\n可手动输入番剧名搜索\n或切换到「自动」模式以启用API后备",
+			);
 			if (currentPlayer)
 				currentPlayer.notice.show = "未自动匹配到弹幕，可点击弹幕按钮手动搜索";
 			return;
@@ -3082,8 +3139,10 @@ async function autoMatch(
 	// ══════════════════════════════════════════════════
 	if (!hasApiUrl()) {
 		setStatus("需配置API地址");
-		panelEls.body.innerHTML =
-			'<div class="cd2-dm-status">未配置弹幕 API 地址<br><br>请通过油猴菜单「⚙ 弹幕 API 配置」设置<br>或切换到「直连」/「自动」模式</div>';
+		renderStatus(
+			panelEls.body,
+			"未配置弹幕 API 地址\n\n请通过油猴菜单「⚙ 弹幕 API 配置」设置\n或切换到「直连」/「自动」模式",
+		);
 		if (currentPlayer)
 			currentPlayer.notice.show = "需配置弹幕 API 地址，或切换弹幕模式";
 		return;
@@ -3096,6 +3155,7 @@ async function autoMatch(
 		console.log("[cd2-artplayer] API策略1: 文件名匹配, fileName=", fileName);
 		setStatus("API匹配中...");
 		const matchResult = await matchVideo(fileName);
+		if (!isCurrent()) return;
 
 		if (matchResult.isMatched && matchResult.matches.length > 0) {
 			const match = matchResult.matches[0];
@@ -3106,6 +3166,7 @@ async function autoMatch(
 				match.episodeId,
 			);
 			await onSelect(match.episodeId, match.episodeTitle);
+			if (!isCurrent()) return;
 			return;
 		}
 
@@ -3115,6 +3176,7 @@ async function autoMatch(
 			setStatus("API搜索中...");
 			panelEls.input.value = keyword;
 			const searchResult = await searchEpisodes(keyword);
+			if (!isCurrent()) return;
 
 			if (searchResult.animes.length > 0) {
 				setLastAnimes(searchResult.animes, false);
@@ -3128,6 +3190,7 @@ async function autoMatch(
 
 				if (best) {
 					await onSelect(best.episodeId, best.episodeTitle);
+					if (!isCurrent()) return;
 					return;
 				}
 
@@ -3147,6 +3210,7 @@ async function autoMatch(
 				);
 				panelEls.input.value = shortKeyword;
 				const retryResult = await searchEpisodes(shortKeyword);
+				if (!isCurrent()) return;
 				if (retryResult.animes.length > 0) {
 					setLastAnimes(retryResult.animes, false);
 					const best = findBestEpisode(fileName, retryResult.animes);
@@ -3158,6 +3222,7 @@ async function autoMatch(
 					);
 					if (best) {
 						await onSelect(best.episodeId, best.episodeTitle);
+						if (!isCurrent()) return;
 						return;
 					}
 					setStatus(`找到 ${retryResult.animes.length} 部番剧，点击选集`);
@@ -3171,345 +3236,13 @@ async function autoMatch(
 
 		// 全部失败
 		setStatus("未找到弹幕，点击搜索");
-		panelEls.body.innerHTML =
-			'<div class="cd2-dm-status">自动匹配失败，请手动输入番剧名搜索</div>';
+		renderStatus(panelEls.body, "自动匹配失败，请手动输入番剧名搜索");
 		if (currentPlayer)
 			currentPlayer.notice.show = "未自动匹配到弹幕，可点击弹幕按钮手动搜索";
 	} catch (err) {
+		if (!isCurrent()) return;
 		console.error("[cd2-artplayer] API匹配异常:", err);
 		setStatus("匹配失败，点击搜索");
-		panelEls.body.innerHTML = `<div class="cd2-dm-status">匹配出错: ${(err as Error).message}</div>`;
+		renderStatus(panelEls.body, `匹配出错: ${(err as Error).message}`);
 	}
-}
-
-// ─── 从文件名提取搜索关键词 ────────────────────────────
-// 针对 dmhy / 字幕组 / 动漫资源站命名规范优化
-//
-// 典型格式:
-//   [LoliHouse] 达尔文事变 / Darwin Jihen - 10 [WebRip 1080p ...].mkv
-//   [綠茶字幕組] 蘑菇魔女 / Champignon no Majo [09][WebRip]...
-//   【幻櫻字幕組】【1月新番】【黃金神威 Golden Kamuy】【59】...
-//   達爾文事變「ダーウィン事変」The Darwin Incident S01E10 1080p ...
-
-/** 检测字符串是否包含CJK字符 */
-function hasCJK(s: string): boolean {
-	return /[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/.test(
-		s,
-	);
-}
-
-function extractKeyword(fileName: string): string {
-	const title = extractTitle(fileName);
-	const season = extractSeasonNumber(fileName);
-
-	// 拼接: 番名 + 第X季 (中文季数标记匹配率更高)
-	let result = title;
-	if (season) {
-		result += ` 第${season}季`;
-	}
-
-	console.log(`[cd2-artplayer] extractKeyword: "${fileName}" → "${result}"`);
-	return result;
-}
-
-// function extractSearchTitle is removed// ─── 提取番名（不含季集，符号去除适配模糊匹配） ──────────
-
-function extractTitle(fileName: string): string {
-	let name = fileName.replace(/\.[^.]+$/, ""); // 去扩展名
-
-	// ── ★ 分隔格式（如 `六四位元字幕組★番名★10★...`）──
-	if (name.includes("\u2605")) {
-		const starParts = name
-			.split("\u2605")
-			.map((s) => s.trim())
-			.filter(Boolean);
-		const titlePart = starParts
-			.slice(1)
-			.find(
-				(p) =>
-					hasCJK(p) &&
-					!/^\d+$/.test(p) &&
-					!/1080|720|1920|AVC|AAC|MP4/i.test(p),
-			);
-		if (titlePart) {
-			name =
-				titlePart
-					.replace(/\s+[A-Z][a-z]+(?:\s+[a-z]+)*(?:\s+[A-Z][a-z]+)*\s*$/i, "")
-					.trim() || titlePart;
-			name = name.replace(/\s+\d{1,3}\s*$/, "").trim();
-			return cleanTitle(name);
-		}
-	}
-
-	// ── 【】包裹全部内容（如【幻櫻字幕組】【1月新番】【黃金神威 Golden Kamuy】【59】）──
-	const fullWidthTags = name.match(/【[^【】]*】/g);
-	if (fullWidthTags && fullWidthTags.length >= 3) {
-		const skipPatterns =
-			/字幕|新番|月新|合集|GB|BIG5|MP4|MKV|1080|720|1920|1280|練習組|练习组/i;
-		for (const tag of fullWidthTags) {
-			const content = tag.slice(1, -1).trim();
-			if (
-				hasCJK(content) &&
-				!skipPatterns.test(content) &&
-				!/^\d+$/.test(content)
-			) {
-				name = content;
-				break;
-			}
-		}
-	}
-
-	// ── 嵌套【】下划线分隔（如 【...的孩子】_我推的孩子_Oshi no Ko】）──
-	if (name.includes("_") && hasCJK(name)) {
-		const parts = name
-			.split("_")
-			.map((s) => s.trim())
-			.filter(Boolean);
-		const cjkTitle = parts.find(
-			(p) => hasCJK(p) && !/字幕|练习|偶像/.test(p) && p.length >= 2,
-		);
-		if (cjkTitle) name = cjkTitle;
-	}
-
-	// ── 剥离开头连续的 [字幕组] / 【字幕组】 标签 ──
-	if (/^\s*[[\u3010]/.test(name)) {
-		name = name.replace(/^(\s*[[\u3010][^\]\u3011]*[\]\u3011]\s*)+/, "").trim();
-	}
-
-	// ── 去壳标题中的【】，保留内容 ──
-	name = name.replace(/【([^】]*)】/g, "$1").trim();
-
-	// ── 用 "/" 分隔提取番名，优先取CJK ──
-	if (name.includes("/")) {
-		const parts = name.split(/\s*\/\s*/);
-		const cjkPart = parts.find((p) => hasCJK(p.trim()));
-		name = cjkPart ? cjkPart.trim() : parts[0].trim();
-	}
-
-	// ── 截断集数及之后的内容 ──
-	name = name
-		.replace(/\s+-\s+\d+\b.*$/, "")
-		.replace(/\s*\[\d+(?:v\d+)?(?:\s*[-~]\s*\d+)?].*$/, "")
-		.replace(/\s+S\d+E\d+\b.*$/i, "")
-		.replace(/(」)\s*The\s+.*$/i, "$1")
-		.replace(/\s+\d{1,3}\s*$/, "")
-		.trim();
-
-	// ── 去除残留技术标记 ──
-	name = name
-		.replace(/[[\u3010][^\]\u3011]*[\]\u3011]/g, "")
-		.replace(/[(\uff08][^)\uff09]*[)\uff09]/g, "")
-		.replace(/\b\d{3,4}[xX\u00d7]\d{3,4}\b/g, "")
-		.replace(/\b(1080[pi]?|720[pi]?|480[pi]?|2160[pi]?|4K|UHD)\b/gi, "")
-		.replace(/\b(HEVC|AVC|H\.?264|H\.?265|x264|x265|10bit|Hi10P|HDR)\b/gi, "")
-		.replace(/\b(AAC|FLAC|DTS|AC3|MP3|OGG|OPUS|EAC3|TrueHD|Atmos)\b/gi, "")
-		.replace(
-			/\b(BluRay|BDRip|WEBRip|WEB-DL|DVDRip|HDTV|REMUX|WebRip|BILIBILI|CR|B-Global|ABEMA|Baha|ViuTV)\b/gi,
-			"",
-		)
-		.replace(/\b(MP4|MKV|AVI|RMVB|FLV|TS|WMV|MOV|WAV)\b/gi, "")
-		.replace(/\b(CHS|CHT|JPN?|ENG?|GB|BIG5|YUE|PGS|SRT|OVA)\b/gi, "")
-		.replace(
-			/(简繁|繁日|简日|简体|繁体|繁體|簡體|双语|雙語|粤语|粵語|中文|日语|日英|配音)/g,
-			"",
-		)
-		.replace(
-			/(字幕组?|字幕組?|翻译|翻譯|招募|内嵌|外挂|内封|內嵌|內封|外封|无字幕|多國字幕)/g,
-			"",
-		)
-		.replace(/\u2605[^\u2605]*\u2605/g, "")
-		.replace(/\u2605/g, "")
-		.replace(/\bv\d+\b/gi, "")
-		.replace(/\bS\d+$/i, "")
-		.replace(/\s+-\s*$/, "")
-		.replace(/^\s*-\s+/, "")
-		.replace(/\s+/g, " ")
-		.trim();
-
-	// ── 截断CJK标题后的拉丁文罗马音 ──
-	if (hasCJK(name)) {
-		const cjkTruncated = name
-			.replace(/\s+[A-Z][a-zA-Z]+(?:\s+[a-zA-Z]+)*\s*$/, "")
-			.trim();
-		if (cjkTruncated.length >= 2 && hasCJK(cjkTruncated)) {
-			name = cjkTruncated;
-		}
-	}
-
-	// ── 回退 ──
-	if (name.length < 2) {
-		const fallback = fileName
-			.replace(/\.[^.]+$/, "")
-			.replace(/[\u3010\u3011【】[\]()（）{}「」『』\u2605]/g, " ")
-			.replace(/\b(1080[pi]?|720[pi]?)\\b/gi, "")
-			.replace(/[-_.]/g, " ")
-			.replace(/\s+/g, " ")
-			.trim();
-		const words = fallback
-			.split(" ")
-			.filter((w) => w.length > 1 && !/^\d+$/.test(w));
-		name = words.slice(0, 4).join(" ");
-	}
-
-	return cleanTitle(name);
-}
-
-/** 去除符号适配模糊匹配: ～→空格, 「」→去除, 季数文字→去除(由S0X表示) */
-function cleanTitle(title: string): string {
-	return title
-		.replace(/[～~「」『』《》""'']/g, " ")
-		.replace(/第[一二三四五六七八九十百千\d]+季/g, "")
-		.replace(/\d+(st|nd|rd|th)\s*Season/gi, "")
-		.replace(/[-_.]+/g, " ")
-		.replace(/\s+/g, " ")
-		.trim();
-}
-
-// ─── 提取季数 ────────────────────────────────────────────
-
-function extractSeasonNumber(fileName: string): number | null {
-	const name = fileName.replace(/\.[^.]+$/, "");
-	const patterns: [RegExp, ((m: RegExpMatchArray) => number)?][] = [
-		[
-			/第([一二三四五六七八九十])季/,
-			(m) => "一二三四五六七八九十".indexOf(m[1]) + 1,
-		],
-		[/第(\d+)季/, (m) => parseInt(m[1], 10)],
-		[/\bS(\d+)\s*E\d+/i],
-		[/\bS(\d+)\b(?!\d)/i],
-		[/(\d+)(?:st|nd|rd|th)\s*Season/i],
-	];
-	for (const [pat, transform] of patterns) {
-		const m = name.match(pat);
-		if (m) {
-			const num = transform ? transform(m) : parseInt(m[1], 10);
-			if (num > 0 && num < 30) return num;
-		}
-	}
-	return null;
-}
-
-// ─── 提取集数 ────────────────────────────────────────────
-
-function extractEpisodeNumber(fileName: string): number | null {
-	const name = fileName.replace(/\.[^.]+$/, "");
-
-	// 优先匹配中文数字集数（如 第二集、第十二话）
-	const cnEpMatch = name.match(/第([一二三四五六七八九十百零]+)[话話集期]/);
-	if (cnEpMatch) {
-		const num = chineseToNumber(cnEpMatch[1]);
-		if (num > 0 && num < 999) return num;
-	}
-
-	const patterns: RegExp[] = [
-		/第(\d+)[话話集期]/,
-		/\bEP?\s*(\d+)\b/i,
-		/\bS\d+E(\d+)\b/i,
-		/\u2605\s*(\d{1,3})\s*\u2605/,
-		/【(\d{1,3})】/,
-		/\[\s*(\d{1,3})\s*\]/,
-		/\s+-\s+(\d{1,3})\s/,
-		/\s+-\s+(\d{1,3})\s*$/,
-		/[\s_.-]\s*(\d{2,3})\s*[\s_.\-[\u3010(v]/,
-		/[\s_.-]\s*(\d{2,3})\s*$/,
-	];
-	for (const pat of patterns) {
-		const m = name.match(pat);
-		if (m) {
-			const num = parseInt(m[1], 10);
-			if (num > 0 && num < 999) return num;
-		}
-	}
-	return null;
-}
-
-// ─── 从文件名推断集数并匹配最佳结果 ───────────────────
-
-function chineseToNumber(cnStr: string): number {
-	const cnNums: { [key: string]: number } = {
-		一: 1,
-		二: 2,
-		三: 3,
-		四: 4,
-		五: 5,
-		六: 6,
-		七: 7,
-		八: 8,
-		九: 9,
-		十: 10,
-		零: 0,
-	};
-	if (/^\d+$/.test(cnStr)) return parseInt(cnStr, 10);
-
-	let result = 0;
-	let current = 0;
-	for (const char of cnStr) {
-		const val = cnNums[char];
-		if (val === undefined) continue;
-		if (val === 10) {
-			if (current === 0) current = 1;
-			result += current * 10;
-			current = 0;
-		} else {
-			current = val;
-		}
-	}
-	result += current;
-	return result;
-}
-
-/**
- * 从弹幕库返回的集标题中提取集数数字（精确边界匹配）
- * 例如: "第2话" → 2, "第二十一集" → 21, "EP08" → 8, "某番 8" → 8
- * 不会让 "第12集" 返回 2（避免子串误匹配）
- */
-function extractEpNumFromTitle(epTitle: string): number | null {
-	// 1. 中文数字: 第X话/集/期
-	const cnMatch = epTitle.match(/第([一二三四五六七八九十百零]+)[话話集期]/);
-	if (cnMatch) return chineseToNumber(cnMatch[1]);
-
-	// 2. 阿拉伯数字: 第X话/集/期
-	const numMatch = epTitle.match(/第\s*(\d+)\s*[话話集期]/);
-	if (numMatch) return parseInt(numMatch[1], 10);
-
-	// 3. EP/E 格式
-	const epMatch = epTitle.match(/\bEP?\s*(\d+)\b/i);
-	if (epMatch) return parseInt(epMatch[1], 10);
-
-	// 4. 标题末尾独立数字（如 "某番 8"），需严格边界
-	const tailMatch = epTitle.match(/(?:^|[\s\-—_#])\s*(\d{1,4})\s*$/);
-	if (tailMatch) {
-		const n = parseInt(tailMatch[1], 10);
-		// 排除年份、分辨率等干扰数字
-		if (n > 0 && n < 999 && ![1080, 720, 480, 2160, 1920].includes(n)) return n;
-	}
-
-	return null;
-}
-
-function findBestEpisode(
-	fileName: string,
-	animes: SearchAnime[],
-): { episodeId: number; animeTitle: string; episodeTitle: string } | null {
-	const epNum = extractEpisodeNumber(fileName);
-	if (epNum === null) return null;
-
-	console.log(`[cd2-artplayer] findBestEpisode: 文件名集数=${epNum}`);
-
-	for (const anime of animes) {
-		for (const ep of anime.episodes) {
-			const titleEpNum = extractEpNumFromTitle(ep.episodeTitle);
-			if (titleEpNum !== null && titleEpNum === epNum) {
-				console.log(
-					`[cd2-artplayer] findBestEpisode: 匹配成功 "${ep.episodeTitle}" → 集数=${titleEpNum}`,
-				);
-				return {
-					episodeId: ep.episodeId,
-					animeTitle: anime.animeTitle,
-					episodeTitle: ep.episodeTitle,
-				};
-			}
-		}
-	}
-	return null;
 }

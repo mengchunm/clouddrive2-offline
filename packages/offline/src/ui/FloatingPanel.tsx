@@ -72,9 +72,12 @@ export function FloatingPanel({ onOpenSettings }: FloatingPanelProps) {
     const panel = panelRef.current;
     const table = panel?.querySelector<HTMLElement>(".cd2-task-table");
     const tableBody = table?.querySelector<HTMLElement>(".ant-table-body");
-    if (!panel || !table || !tableBody) return 480;
+    if (!panel || !table || !tableBody || tableBody.clientWidth === 0 || !tableBody.offsetParent) {
+      return 480;
+    }
     const panelChromeWidth = Math.max(0, panel.getBoundingClientRect().width - tableBody.clientWidth);
-    return Math.ceil(panelChromeWidth + 32 + 140 + 90 + 180);
+    if (panelChromeWidth > 100) return 480;
+    return Math.max(480, Math.ceil(panelChromeWidth + 32 + 140 + 90 + 180));
   }, []);
 
   const clampPosition = useCallback((candidate: FloatingPanelPosition, element: HTMLElement | null) => {
@@ -408,19 +411,53 @@ export function FloatingPanel({ onOpenSettings }: FloatingPanelProps) {
     }
   };
 
+  const linkCount = useMemo(() => {
+    return batchUrls
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean).length;
+  }, [batchUrls]);
+
   const addOfflineNode = (
-    <Space direction="vertical" style={{ width: "100%" }}>
-      <Typography.Text type="secondary">每行一个磁力链接或直链 URL</Typography.Text>
-      <Input.TextArea
-        rows={6}
-        placeholder={"magnet:?xt=urn:btih:...\nhttps://example.com/file.zip\n..."}
-        value={batchUrls}
-        onChange={(e) => setBatchUrls(e.target.value)}
-      />
-      <Button type="primary" onClick={onBatchAdd} loading={submitting} disabled={!batchUrls.trim()}>
-        批量提交
-      </Button>
-    </Space>
+    <div className="cd2-add-task-layout">
+      <div className="cd2-add-task-header">
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          支持磁力链接（magnet:?xt=...）或 HTTP/HTTPS 直链，每行一个
+        </Typography.Text>
+      </div>
+      <div className="cd2-add-task-body">
+        <Input.TextArea
+          className="cd2-add-task-textarea"
+          placeholder={"magnet:?xt=urn:btih:...\nhttps://example.com/file.zip\n..."}
+          value={batchUrls}
+          onChange={(e) => setBatchUrls(e.target.value)}
+          autoSize={false}
+        />
+      </div>
+      <div className="cd2-add-task-footer">
+        <div className="cd2-add-task-status">
+          {linkCount > 0 && (
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              已输入{" "}
+              <Typography.Text strong style={{ fontSize: 12 }}>
+                {linkCount}
+              </Typography.Text>{" "}
+              个任务
+            </Typography.Text>
+          )}
+        </div>
+        <Space size={8}>
+          {batchUrls.trim() && (
+            <Button size="small" onClick={() => setBatchUrls("")} disabled={submitting}>
+              清空
+            </Button>
+          )}
+          <Button type="primary" size="small" onClick={onBatchAdd} loading={submitting} disabled={!batchUrls.trim()}>
+            批量提交{linkCount > 1 ? ` (${linkCount})` : ""}
+          </Button>
+        </Space>
+      </div>
+    </div>
   );
 
   const items = useMemo(

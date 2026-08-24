@@ -14,6 +14,7 @@
 		"build": "vite build",
 		"preview": "vite preview",
 		"test:mkv-metadata": "node scripts/test-mkv-metadata.mjs",
+		"test:player-utils": "node scripts/test-player-utils.mjs",
 		"ci": "biome ci",
 		"typecheck": "tsc --noEmit",
 		"lint": "biome lint --write",

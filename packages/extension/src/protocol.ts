@@ -20,9 +20,20 @@ export interface FetchProxyMessage {
 	request: FetchProxyRequest;
 }
 
+export type ExtensionCommandId = "danmu-api" | "danmu-mode" | "close-player";
+
 export interface RunCommandMessage {
 	type: "cd2-run-command";
-	titlePrefix: string;
+	command: ExtensionCommandId;
+}
+
+export interface GetCommandStateMessage {
+	type: "cd2-get-command-state";
+}
+
+export interface CommandStateResponse {
+	ok: boolean;
+	availableCommands: ExtensionCommandId[];
 }
 
 export interface OpenOptionsMessage {
@@ -66,35 +77,4 @@ export interface NativeStatusMessage {
 
 export interface NativeUninstallMessage {
 	type: "cd2-native-uninstall";
-}
-
-export interface RegisterMediaCacheMessage {
-	type: "cd2-register-media-cache";
-	url: string;
-	cacheKey?: string;
-	fileName?: string;
-	fileSize?: number;
-}
-
-export interface RegisterMediaCacheResponse {
-	ok: boolean;
-	playbackUrl?: string;
-	cacheEnabled?: boolean;
-	totalSize?: number;
-	reason?: string;
-}
-
-export interface MediaCacheStatsMessage {
-	type: "cd2-media-cache-stats";
-}
-
-export interface ClearMediaCacheMessage {
-	type: "cd2-media-cache-clear";
-}
-
-export interface MediaCacheStatsResponse {
-	ok: boolean;
-	totalBytes: number;
-	maxBytes: number;
-	error?: string;
 }

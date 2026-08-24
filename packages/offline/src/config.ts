@@ -1,9 +1,7 @@
 import { GM_getValue, GM_setValue } from "vite-plugin-monkey/dist/client";
-export type AppConfig = {
-  grpcBaseUrl: string;
-  apiToken: string; // Bearer token or api token
-  offlineDestPath: string; // default path for offline download
-};
+import { type AppConfig, normalizeAppConfig } from "@/utils/configSchema";
+
+export type { AppConfig } from "@/utils/configSchema";
 
 export type FloatingPanelPosition = {
   left: number;
@@ -25,6 +23,8 @@ export type TaskListViewState = {
   scrollTop: number;
 };
 
+export type PreferredPlayer = "web" | "potplayer" | "dandanplay" | "infuse";
+
 const KEY = "cd2_config_v1";
 const SHOW_PANEL_KEY = "cd2_show_panel";
 export const LOCAL_DIRECTORY_KEY = "cd2_local_directory_enabled";
@@ -34,23 +34,18 @@ const FLOATING_PANEL_POSITIONS_KEY = "cd2_floating_panel_positions_v2";
 const FLOATING_PANEL_SIZE_KEY = "cd2_floating_panel_size_v1";
 const FLOATING_PANEL_EXPANDED_SESSION_KEY = "cd2_floating_panel_expanded_session_v1";
 const TASK_LIST_VIEW_STATE_KEY = "cd2_task_list_view_state_v1";
+const PREFERRED_PLAYER_KEY = "cd2_default_player";
 
 let floatingPanelExpandedForDocument: boolean | undefined;
 
 export function getConfig(): AppConfig {
-  const v = (typeof GM_getValue !== "undefined" ? GM_getValue(KEY, null) : null) as AppConfig | null;
-  if (v && typeof v === "object") return v;
-  return {
-    grpcBaseUrl: "http://localhost:19798",
-    apiToken: "",
-    offlineDestPath: "/",
-  };
+  const stored = typeof GM_getValue !== "undefined" ? GM_getValue(KEY, null) : null;
+  return normalizeAppConfig(stored);
 }
 
-export function setConfig(cfg: AppConfig) {
+export function setConfig(cfg: AppConfig): void {
   if (typeof GM_setValue !== "undefined") {
-    GM_setValue(KEY, cfg);
-    console.log("Config saved:", cfg);
+    GM_setValue(KEY, normalizeAppConfig(cfg));
   }
 }
 
@@ -151,6 +146,34 @@ export function getTaskListViewState(): TaskListViewState {
 
 export function setTaskListViewState(state: TaskListViewState): void {
   if (typeof GM_setValue !== "undefined") GM_setValue(TASK_LIST_VIEW_STATE_KEY, state);
+}
+
+function isPreferredPlayer(value: unknown): value is PreferredPlayer {
+  return value === "web" || value === "potplayer" || value === "dandanplay" || value === "infuse";
+}
+
+export function getPreferredPlayer(): PreferredPlayer {
+  if (typeof GM_getValue !== "undefined") {
+    const stored = GM_getValue<unknown>(PREFERRED_PLAYER_KEY, null);
+    if (isPreferredPlayer(stored)) return stored;
+  }
+
+  // Migrate the former per-site preference once. Content-script localStorage is
+  // scoped to the visited site, so all new writes use the shared GM storage.
+  try {
+    const legacy = localStorage.getItem(PREFERRED_PLAYER_KEY);
+    if (isPreferredPlayer(legacy)) {
+      setPreferredPlayer(legacy);
+      return legacy;
+    }
+  } catch {
+    // Restricted pages may deny Web Storage access.
+  }
+  return "web";
+}
+
+export function setPreferredPlayer(player: PreferredPlayer): void {
+  if (typeof GM_setValue !== "undefined") GM_setValue(PREFERRED_PLAYER_KEY, player);
 }
 
 export function getLocalDirectoryEnabled(): boolean {

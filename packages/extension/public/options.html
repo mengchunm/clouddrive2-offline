@@ -4,66 +4,204 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>CloudDrive2 Offline 设置</title>
+    <link rel="icon" href="icons/clouddrive.png" />
     <link rel="stylesheet" href="options.css" />
   </head>
   <body>
-    <main>
-      <h1>CloudDrive2 Offline 设置</h1>
-      <p class="hint">配置浏览器能够访问的 CloudDrive2 gRPC-Web 地址。</p>
+    <main class="app-shell">
+      <header class="brand-header">
+        <img class="brand-mark" src="icons/clouddrive.png" width="44" height="44" alt="" />
+        <div class="brand-info">
+          <h1>CloudDrive2 Offline</h1>
+          <p class="brand-desc">CloudDrive2 磁链解析与离线下载扩展设置</p>
+        </div>
+      </header>
+
       <form id="settings-form">
-        <label>
-          CloudDrive2 地址
-          <input id="grpcBaseUrl" type="url" required placeholder="http://localhost:19798" />
-        </label>
-        <label>
-          API Token
-          <input id="apiToken" type="password" autocomplete="off" placeholder="Bearer token 或 API token" />
-        </label>
-        <label>
-          离线下载路径
-          <input id="offlineDestPath" type="text" required placeholder="/" />
-        </label>
-        <label class="check-row">
-          <input id="showPanel" type="checkbox" />
-          在检测到磁力链接时显示悬浮面板
-        </label>
-        <label class="check-row">
-          <input id="showDanmakuHeatmap" type="checkbox" />
-          显示弹幕热力图（进度条上方的弹幕密度波形）
-        </label>
-        <section class="native-section cache-section">
-          <div class="native-heading">
-            <strong>视频分片缓存</strong>
-            <span id="mediaCacheStatus" class="native-status" data-tone="checking">正在统计…</span>
+        <section class="section-card" aria-labelledby="connection-title">
+          <header class="section-heading">
+            <h2 id="connection-title">连接</h2>
+            <p class="section-desc">配置 CloudDrive2 服务地址与访问凭据</p>
+          </header>
+          <div class="field-grid">
+            <label class="field field-wide">
+              <span>服务地址</span>
+              <input
+                id="grpcBaseUrl"
+                type="url"
+                required
+                inputmode="url"
+                placeholder="http://localhost:19798"
+                aria-describedby="grpcBaseUrlHelp"
+              />
+              <small id="grpcBaseUrlHelp" class="field-help">CloudDrive2 的 gRPC-Web 服务地址</small>
+            </label>
+            <div class="field">
+              <label for="apiToken">API Token</label>
+              <div class="input-with-action">
+                <input
+                  id="apiToken"
+                  type="password"
+                  autocomplete="off"
+                  placeholder="Bearer / API token"
+                  aria-describedby="apiTokenHelp"
+                />
+                <button
+                  id="toggleApiTokenVisibility"
+                  type="button"
+                  class="field-action"
+                  aria-controls="apiToken"
+                  aria-pressed="false"
+                >
+                  显示
+                </button>
+              </div>
+              <small id="apiTokenHelp" class="field-help">仅保存在此浏览器的扩展存储中</small>
+            </div>
+            <label class="field">
+              <span>离线下载路径</span>
+              <input id="offlineDestPath" type="text" required placeholder="/" aria-describedby="offlinePathHelp" />
+              <small id="offlinePathHelp" class="field-help">新任务默认保存到此 CloudDrive2 路径</small>
+            </label>
           </div>
-          <label class="check-row">
-            <input id="mediaCacheEnabled" type="checkbox" />
-            刷新页面后复用已经加载的视频分片
-          </label>
-          <div class="native-actions">
-            <button id="clearMediaCache" type="button" class="text-button">清理视频缓存</button>
-          </div>
-          <p class="native-note">按 4 MB 分片持久保存，最多使用 2 GB；空间不足时自动清理最久未使用的分片。</p>
         </section>
-        <section class="native-section">
-          <div class="native-heading">
-            <strong>本地文件定位助手</strong>
-            <span id="nativeStatus" class="native-status" data-tone="checking">正在检测…</span>
+
+        <section class="section-card" aria-labelledby="appearance-title">
+          <header class="section-heading">
+            <h2 id="appearance-title">界面</h2>
+            <p class="section-desc">自定义扩展在网页中的显示效果</p>
+          </header>
+          <div class="toggle-list">
+            <label class="toggle-row" for="showPanel">
+              <span class="toggle-info">
+                <strong>悬浮面板</strong>
+                <small>检测到磁力链接时显示悬浮图标和任务窗口</small>
+              </span>
+              <span class="toggle-switch">
+                <input id="showPanel" type="checkbox" role="switch" />
+                <span class="toggle-slider"></span>
+              </span>
+            </label>
+            <label class="toggle-row" for="showDanmakuHeatmap">
+              <span class="toggle-info">
+                <strong>弹幕热力图</strong>
+                <small>在播放器进度条上显示弹幕密度分布</small>
+              </span>
+              <span class="toggle-switch">
+                <input id="showDanmakuHeatmap" type="checkbox" role="switch" />
+                <span class="toggle-slider"></span>
+              </span>
+            </label>
           </div>
-          <p>用于在任务文件列表中打开目录，或在 Windows 文件管理器中选中具体文件。</p>
-          <div class="native-actions">
-            <button id="downloadNativeInstaller" type="button" class="secondary-button">下载脚本</button>
-            <button id="uninstallNativeHost" type="button" class="text-button">卸载脚本</button>
-          </div>
-          <p class="native-note">脚本随扩展打包；下载后运行一次即可，不安装 EXE、服务或驱动。</p>
         </section>
-        <div class="actions">
-          <button type="submit">保存设置</button>
-          <span id="status" role="status"></span>
+
+        <section id="playback-settings" class="section-card" aria-labelledby="playback-title">
+          <header class="section-heading">
+            <h2 id="playback-title">播放与弹幕</h2>
+            <p class="section-desc">设置默认媒体播放器与弹幕模式</p>
+          </header>
+          <div class="field-grid">
+            <label class="field">
+              <span>默认播放器</span>
+              <select id="defaultPlayer" aria-describedby="defaultPlayerHelp">
+                <option value="web">网页播放器</option>
+                <option value="potplayer">PotPlayer</option>
+                <option value="dandanplay">弹弹Play</option>
+                <option value="infuse">Infuse</option>
+              </select>
+              <small id="defaultPlayerHelp" class="field-help">任务列表中的播放按钮默认使用此播放器</small>
+            </label>
+            <label class="field">
+              <span>弹幕匹配模式</span>
+              <select id="danmuMode" aria-describedby="danmuModeHelp">
+                <option value="direct">仅直连</option>
+                <option value="auto">自动（直连优先）</option>
+                <option value="api">仅 API</option>
+              </select>
+              <small id="danmuModeHelp" class="field-help">自动模式会在直连失败后回退到后备 API</small>
+            </label>
+            <div class="field field-wide">
+              <label for="danmuApiUrl">后备弹幕 API</label>
+              <div class="input-with-action">
+                <input
+                  id="danmuApiUrl"
+                  type="password"
+                  inputmode="url"
+                  autocomplete="off"
+                  placeholder="https://example.com/token"
+                  aria-describedby="danmuApiUrlHelp danmuApiUrlError"
+                />
+                <button
+                  id="toggleDanmuApiVisibility"
+                  type="button"
+                  class="field-action"
+                  aria-controls="danmuApiUrl"
+                  aria-pressed="false"
+                >
+                  显示
+                </button>
+              </div>
+              <small id="danmuApiUrlHelp" class="field-help">可留空；地址可能包含访问令牌，请勿公开分享</small>
+              <small id="danmuApiUrlError" class="field-error" aria-live="polite"></small>
+            </div>
+          </div>
+        </section>
+
+        <section class="section-card" aria-labelledby="native-title">
+          <header class="section-heading native-heading">
+            <div>
+              <h2 id="native-title">本地文件定位</h2>
+              <p class="section-desc">Windows 本地挂载目录快速定位助手</p>
+            </div>
+            <span id="nativeStatus" class="status-chip" data-tone="checking" role="status" aria-live="polite">
+              检测中…
+            </span>
+          </header>
+          <div class="native-actions">
+            <button id="downloadNativeInstaller" type="button" class="button button-secondary">
+              <span class="ui-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 20h14" /></svg>
+              </span>
+              <span id="downloadNativeInstallerLabel">下载助手</span>
+            </button>
+            <button id="refreshNativeHost" type="button" class="button button-ghost">
+              <span class="ui-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M19 8a7 7 0 1 0 1 5M19 4v4h-4" /></svg>
+              </span>
+              重新检测
+            </button>
+            <button id="uninstallNativeHost" type="button" class="button button-ghost">
+              <span class="ui-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3m-8 0 1 13h8l1-13M10 11v5m4-5v5" /></svg>
+              </span>
+              卸载
+            </button>
+          </div>
+          <p class="native-note">下载完成后运行一次脚本，再返回此页面重新检测。主功能不依赖本地助手。</p>
+        </section>
+
+        <footer class="form-actions">
+          <button id="saveSettings" type="submit" class="button button-primary">
+            <span class="ui-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6" /></svg>
+            </span>
+            保存
+          </button>
+          <span id="status" class="save-status" role="status" aria-live="polite"></span>
+        </footer>
+      </form>
+    </main>
+
+    <dialog id="uninstallConfirm" class="confirmation-dialog" aria-labelledby="uninstallConfirmTitle">
+      <form method="dialog">
+        <h2 id="uninstallConfirmTitle">卸载本地助手？</h2>
+        <p>卸载后将无法从任务列表打开或定位 Windows 本地文件，其他功能不受影响。</p>
+        <div class="dialog-actions">
+          <button type="submit" value="cancel" class="button button-secondary" autofocus>取消</button>
+          <button type="submit" value="uninstall" class="button button-danger">卸载助手</button>
         </div>
       </form>
-      <aside>若 CloudDrive2 不在本机，请填写当前电脑能访问的局域网地址，不能填写远端设备的 localhost。</aside>
-    </main>
+    </dialog>
     <script src="options.js"></script>
   </body>
 </html>
