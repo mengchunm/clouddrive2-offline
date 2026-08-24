@@ -317,6 +317,34 @@
   overflow-y: auto !important;
   overflow-anchor: none;
   scrollbar-gutter: stable;
+  scrollbar-color: transparent transparent;
+  transition: scrollbar-color 250ms ease;
+}
+
+.cd2-task-table .ant-table-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.cd2-task-table .ant-table-body::-webkit-scrollbar-thumb {
+  background-color: transparent;
+  border-radius: 999px;
+  transition: background-color 250ms ease;
+}
+
+.cd2-task-table .ant-table-body.cd2-is-scrolling {
+  scrollbar-color: rgba(0, 0, 0, 0.35) transparent;
+}
+
+.cd2-task-table .ant-table-body.cd2-is-scrolling::-webkit-scrollbar-thumb {
+  background-color: rgba(0, 0, 0, 0.35);
+}
+
+.cd2-task-table .ant-table-body.cd2-is-fading {
+  scrollbar-color: rgba(0, 0, 0, 0.12) transparent;
+}
+
+.cd2-task-table .ant-table-body.cd2-is-fading::-webkit-scrollbar-thumb {
+  background-color: rgba(0, 0, 0, 0.12);
 }
 
 .cd2-task-table .ant-table-header table,
@@ -609,5 +637,21 @@
 
   .cd2-task-files-inline {
     background: rgba(22, 119, 255, 0.13);
+  }
+
+  .cd2-task-table .ant-table-body.cd2-is-scrolling {
+    scrollbar-color: rgba(255, 255, 255, 0.42) transparent;
+  }
+
+  .cd2-task-table .ant-table-body.cd2-is-scrolling::-webkit-scrollbar-thumb {
+    background-color: rgba(255, 255, 255, 0.42);
+  }
+
+  .cd2-task-table .ant-table-body.cd2-is-fading {
+    scrollbar-color: rgba(255, 255, 255, 0.16) transparent;
+  }
+
+  .cd2-task-table .ant-table-body.cd2-is-fading::-webkit-scrollbar-thumb {
+    background-color: rgba(255, 255, 255, 0.16);
   }
 }

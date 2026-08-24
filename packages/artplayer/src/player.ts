@@ -202,6 +202,15 @@ const DEFAULT_PLAYER_ASPECT_RATIO = 16 / 9;
 const MIN_PLAYER_WINDOW_WIDTH = 480;
 const MIN_PLAYER_WINDOW_HEIGHT = 270;
 
+function queryRequired<T extends Element>(
+	root: ParentNode,
+	selector: string,
+): T {
+	const element = root.querySelector<T>(selector);
+	if (!element) throw new Error(`播放器界面缺少元素: ${selector}`);
+	return element;
+}
+
 function subtitleIdentity(item: SubtitleSelectorItem): string {
 	if (!item.url && !item.mkvTrackId) return "off";
 	if (item.mkvTrackId !== undefined) return `mkv:${item.mkvTrackId}`;
@@ -747,21 +756,20 @@ function createDanmakuPanel(playerContainer: HTMLDivElement) {
 	// 放在播放器容器的父级（overlay），而不是 artplayer 内部
 	playerContainer.parentElement?.appendChild(panel);
 
-	// biome-ignore lint/style/noNonNullAssertion: Guaranteed by DOM structure
-	const input = panel.querySelector<HTMLInputElement>(".cd2-dm-search input")!;
-	// biome-ignore lint/style/noNonNullAssertion: Guaranteed by DOM structure
-	const searchBtn = panel.querySelector<HTMLButtonElement>(
+	const input = queryRequired<HTMLInputElement>(panel, ".cd2-dm-search input");
+	const searchBtn = queryRequired<HTMLButtonElement>(
+		panel,
 		".cd2-dm-search button",
-	)!;
-	// biome-ignore lint/style/noNonNullAssertion: Guaranteed by DOM structure
-	const body = panel.querySelector<HTMLDivElement>(".cd2-dm-body")!;
-	// biome-ignore lint/style/noNonNullAssertion: Guaranteed by DOM structure
-	const closeBtn = panel.querySelector<HTMLButtonElement>(
+	);
+	const body = queryRequired<HTMLDivElement>(panel, ".cd2-dm-body");
+	const closeBtn = queryRequired<HTMLButtonElement>(
+		panel,
 		".cd2-dm-close-panel",
-	)!;
-	// biome-ignore lint/style/noNonNullAssertion: Guaranteed by DOM structure
-	const modeBadge =
-		panel.querySelector<HTMLButtonElement>(".cd2-dm-mode-badge")!;
+	);
+	const modeBadge = queryRequired<HTMLButtonElement>(
+		panel,
+		".cd2-dm-mode-badge",
+	);
 	let returnFocus: HTMLElement | null = null;
 
 	const show = (trigger?: HTMLElement) => {

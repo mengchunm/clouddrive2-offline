@@ -28,7 +28,7 @@ const releaseNote = path.join(root, `docs/releases/${version}.md`);
 if (!existsSync(releaseNote))
 	failures.push(`missing docs/releases/${version}.md`);
 
-const requestedTag = process.argv[2]?.trim();
+const requestedTag = process.argv.slice(2).find((argument) => argument !== "--")?.trim();
 if (requestedTag && requestedTag.replace(/^v/, "") !== version) {
 	failures.push(`release tag ${requestedTag} != v${version}`);
 }

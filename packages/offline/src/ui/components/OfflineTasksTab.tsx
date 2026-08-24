@@ -44,9 +44,11 @@ import {
   getConfig,
   getDeleteFiles,
   getLocalDirectoryEnabled,
+  getPreferredPlayer,
   getTaskListViewState,
   LOCAL_DIRECTORY_KEY,
   setDeleteFiles,
+  setPreferredPlayer,
   setTaskListViewState,
 } from "@/config";
 import {
@@ -64,6 +66,7 @@ import {
 } from "@/grpc/client";
 import { mapCloudPathToLocal } from "@/localMount";
 import { OfflineFileStatus } from "@/proto/clouddrive_pb";
+import { getFileExtension, getFileKind, isPlayableMediaFile, VIDEO_EXTENSIONS } from "@/utils/mediaCatalog";
 import { buildPotPlayerClipboardPlaylist, selectPreferredMedia, sortMediaPlaylistByName } from "@/utils/mediaPlaylist";
 import { findMatchingTaskRoot } from "@/utils/taskRootMatch";
 import { createTaskSearchText, getTaskSearchKeywords, matchesTaskSearch } from "@/utils/taskSearch";
@@ -90,8 +93,7 @@ function renderPlayerIcon(playerType: PlayerType, alt = "player") {
 }
 
 function getStoredPlayerType(): PlayerType {
-  const stored = localStorage.getItem("cd2_default_player");
-  return stored && stored in PLAYER_CONFIG ? (stored as PlayerType) : "web";
+  return getPreferredPlayer();
 }
 
 type Row = {
@@ -134,6 +136,8 @@ type TaskFileSelectionGroup = {
   taskKey: string;
   files: TaskFile[];
 };
+type SubtitleFile = { fileName: string; filePath: string };
+type ResolvedSubtitleFile = SubtitleFile & { url: string };
 type Quota = { total: number; used: number; left: number };
 type SearchIndexProgress = {
   loadedPages: number;
@@ -152,57 +156,14 @@ const SEARCH_CACHE_MAX_ROWS = 5_000;
 const SEARCH_CACHE_TTL = 60_000;
 const PAGE_REFRESH_TTL = 5_000;
 const MIN_REFRESH_FEEDBACK_MS = 400;
+const SCROLLBAR_HIDE_DELAY_MS = 700;
+const SCROLLBAR_FADE_DURATION_MS = 250;
 const FILE_CHECK_CACHE_MAX = 300;
 const FILE_CHECK_CACHE_TTL = 120_000;
 const MOUNT_POINTS_CACHE_TTL = 300_000;
-const VIDEO_EXTENSIONS = new Set(["mp4", "mkv", "avi", "rmvb", "mov", "flv", "ts", "m2ts", "webm", "iso"]);
-const AUDIO_EXTENSIONS = new Set(["mp3", "flac", "wav", "m4a", "aac", "ogg", "opus", "ape", "wma"]);
-const IMAGE_EXTENSIONS = new Set(["jpg", "jpeg", "png", "gif", "webp", "bmp", "svg", "avif", "heic"]);
-const SUBTITLE_EXTENSIONS = new Set(["srt", "ass", "ssa", "vtt", "sub", "sup"]);
-const ARCHIVE_EXTENSIONS = new Set(["zip", "rar", "7z", "tar", "gz", "bz2", "xz"]);
-const DOCUMENT_EXTENSIONS = new Set(["pdf", "txt", "md", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "epub"]);
-const CODE_EXTENSIONS = new Set([
-  "js",
-  "jsx",
-  "ts",
-  "tsx",
-  "html",
-  "htm",
-  "css",
-  "less",
-  "scss",
-  "json",
-  "xml",
-  "yaml",
-  "yml",
-  "toml",
-  "ini",
-  "conf",
-  "py",
-  "java",
-  "c",
-  "h",
-  "cpp",
-  "hpp",
-  "cs",
-  "go",
-  "rs",
-  "sh",
-  "bat",
-  "cmd",
-  "ps1",
-  "sql",
-]);
-const LINK_AND_PLAYLIST_EXTENSIONS = new Set(["m3u", "m3u8", "pls", "cue", "torrent", "url"]);
-
-function getFileExtension(name: string): string {
-  const index = name.lastIndexOf(".");
-  return index > 0 ? name.slice(index + 1).toLowerCase() : "";
-}
 
 function isPlayableFile(file: TaskFile): boolean {
-  const extension = getFileExtension(file.name);
-  return !file.isDirectory && (VIDEO_EXTENSIONS.has(extension) || AUDIO_EXTENSIONS.has(extension));
+  return isPlayableMediaFile(file);
 }
 
 function renderTaskFileTypeIcon(file: TaskFile) {
@@ -213,17 +174,17 @@ function renderTaskFileTypeIcon(file: TaskFile) {
       </span>
     );
   }
-  const extension = getFileExtension(file.name);
+  const kind = getFileKind(file);
   let icon = <FileOutlined />;
-  if (VIDEO_EXTENSIONS.has(extension)) icon = <PlaySquareOutlined />;
-  else if (AUDIO_EXTENSIONS.has(extension)) icon = <AudioOutlined />;
-  else if (IMAGE_EXTENSIONS.has(extension)) icon = <FileImageOutlined />;
-  else if (SUBTITLE_EXTENSIONS.has(extension)) icon = <FontSizeOutlined />;
-  else if (ARCHIVE_EXTENSIONS.has(extension)) icon = <FileZipOutlined />;
-  else if (extension === "pdf") icon = <FilePdfOutlined />;
-  else if (CODE_EXTENSIONS.has(extension)) icon = <CodeOutlined />;
-  else if (LINK_AND_PLAYLIST_EXTENSIONS.has(extension)) icon = <LinkOutlined />;
-  else if (DOCUMENT_EXTENSIONS.has(extension)) icon = <FileTextOutlined />;
+  if (kind === "video") icon = <PlaySquareOutlined />;
+  else if (kind === "audio") icon = <AudioOutlined />;
+  else if (kind === "image") icon = <FileImageOutlined />;
+  else if (kind === "subtitle") icon = <FontSizeOutlined />;
+  else if (kind === "archive") icon = <FileZipOutlined />;
+  else if (kind === "pdf") icon = <FilePdfOutlined />;
+  else if (kind === "code") icon = <CodeOutlined />;
+  else if (kind === "link") icon = <LinkOutlined />;
+  else if (kind === "document") icon = <FileTextOutlined />;
   return (
     <span className="cd2-task-file-type-icon" aria-hidden="true">
       {icon}
@@ -241,6 +202,10 @@ function formatFileBytes(value: bigint | number): string {
     index++;
   }
   return `${bytes.toFixed(bytes >= 100 ? 0 : bytes >= 10 ? 1 : 2)} ${units[index]}`;
+}
+
+function formatMegabytes(value: number): string {
+  return formatFileBytes(value * 1024 * 1024);
 }
 
 function formatTaskProgress(value: number): string {
@@ -810,11 +775,31 @@ export function OfflineTasksTab() {
     [persistTaskListView],
   );
 
+  // The keyed table is recreated when the player changes, so rebind the scroll listener.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: defaultPlayer tracks the keyed table DOM replacement.
   useEffect(() => {
     const tableBody = taskTableRef.current?.querySelector<HTMLElement>(".ant-table-body");
     if (!tableBody) return;
 
+    let scrollbarHideTimer: number | undefined;
+    let scrollbarFadeTimer: number | undefined;
+    const showScrollbarWhileScrolling = () => {
+      tableBody.classList.remove("cd2-is-fading");
+      tableBody.classList.add("cd2-is-scrolling");
+      if (scrollbarHideTimer !== undefined) window.clearTimeout(scrollbarHideTimer);
+      if (scrollbarFadeTimer !== undefined) window.clearTimeout(scrollbarFadeTimer);
+      scrollbarHideTimer = window.setTimeout(() => {
+        tableBody.classList.remove("cd2-is-scrolling");
+        tableBody.classList.add("cd2-is-fading");
+        scrollbarHideTimer = undefined;
+        scrollbarFadeTimer = window.setTimeout(() => {
+          tableBody.classList.remove("cd2-is-fading");
+          scrollbarFadeTimer = undefined;
+        }, SCROLLBAR_FADE_DURATION_MS);
+      }, SCROLLBAR_HIDE_DELAY_MS);
+    };
     const onScroll = () => {
+      showScrollbarWhileScrolling();
       if (scrollRestorePendingRef.current) return;
       scrollTopRef.current = tableBody.scrollTop;
       if (scrollSaveTimerRef.current !== null) return;
@@ -826,9 +811,12 @@ export function OfflineTasksTab() {
     return () => {
       tableBody.removeEventListener("scroll", onScroll);
       window.removeEventListener("pagehide", onPageHide);
+      if (scrollbarHideTimer !== undefined) window.clearTimeout(scrollbarHideTimer);
+      if (scrollbarFadeTimer !== undefined) window.clearTimeout(scrollbarFadeTimer);
+      tableBody.classList.remove("cd2-is-scrolling", "cd2-is-fading");
       persistTaskListView();
     };
-  }, [persistTaskListView]);
+  }, [defaultPlayer, persistTaskListView]);
 
   useEffect(() => {
     if (loading || rows.length === 0 || !scrollRestorePendingRef.current) return;
@@ -1442,19 +1430,6 @@ export function OfflineTasksTab() {
     setDeleteFiles(checked);
   }, []);
 
-  const formatBytes = useCallback((bytesInMB: number): string => {
-    const bytes = bytesInMB * 1024 * 1024;
-    if (!bytes || bytes <= 0) return "-";
-    const units = ["B", "KB", "MB", "GB", "TB", "PB"] as const;
-    let idx = 0;
-    let val = bytes;
-    while (val >= 1024 && idx < units.length - 1) {
-      val /= 1024;
-      idx++;
-    }
-    return `${val.toFixed(val >= 100 ? 0 : val >= 10 ? 1 : 2)} ${units[idx]}`;
-  }, []);
-
   const statusText = useCallback((s: OfflineFileStatus) => {
     const map: Record<number, { text: string; color: string }> = {
       0: { text: "初始", color: "default" },
@@ -2030,9 +2005,8 @@ export function OfflineTasksTab() {
       if (!rootFile) return undefined;
       if (!rootFile.isDirectory) return rootFile;
 
-      const mediaExts = [".mp4", ".mkv", ".avi", ".rmvb", ".mov", ".flv", ".ts", ".m2ts", ".iso"];
       const isMedia = (f: { name: string; isDirectory?: boolean }) =>
-        !f.isDirectory && mediaExts.some((ext) => f.name.toLowerCase().endsWith(ext));
+        !f.isDirectory && VIDEO_EXTENSIONS.has(getFileExtension(f.name));
 
       let largestMediaFile: typeof rootFile | undefined;
       let maxMediaSize = -1;
@@ -2162,35 +2136,32 @@ export function OfflineTasksTab() {
   );
 
   /** 扫描视频文件所在目录的字幕文件 */
-  const resolveSubtitles = useCallback(
-    async (videoFilePath: string): Promise<{ fileName: string; filePath: string }[]> => {
-      const subtitleExts = [".srt", ".ass", ".ssa", ".vtt"];
-      const isSubtitle = (f: { name: string; isDirectory?: boolean }) =>
-        !f.isDirectory && subtitleExts.some((ext) => f.name.toLowerCase().endsWith(ext));
+  const resolveSubtitles = useCallback(async (videoFilePath: string): Promise<SubtitleFile[]> => {
+    const subtitleExts = new Set(["srt", "ass", "ssa", "vtt"]);
+    const isSubtitle = (f: { name: string; isDirectory?: boolean }) =>
+      !f.isDirectory && subtitleExts.has(getFileExtension(f.name));
 
-      // 获取视频文件所在目录路径
-      const lastSlash = Math.max(videoFilePath.lastIndexOf("/"), videoFilePath.lastIndexOf("\\"));
-      if (lastSlash < 0) return [];
-      const parentDir = videoFilePath.substring(0, lastSlash);
+    // 获取视频文件所在目录路径
+    const lastSlash = Math.max(videoFilePath.lastIndexOf("/"), videoFilePath.lastIndexOf("\\"));
+    if (lastSlash < 0) return [];
+    const parentDir = videoFilePath.substring(0, lastSlash);
 
-      try {
-        const files = await listSubFiles(parentDir);
-        return files
-          .filter(isSubtitle)
-          .map((f) => ({ fileName: f.name, filePath: f.fullPathName }))
-          .sort((a, b) =>
-            a.fileName.localeCompare(b.fileName, undefined, {
-              numeric: true,
-              sensitivity: "base",
-            }),
-          );
-      } catch (e) {
-        console.warn(`[cd2] resolveSubtitles scan failed for ${parentDir}`, e);
-        return [];
-      }
-    },
-    [],
-  );
+    try {
+      const files = await listSubFiles(parentDir);
+      return files
+        .filter(isSubtitle)
+        .map((f) => ({ fileName: f.name, filePath: f.fullPathName }))
+        .sort((a, b) =>
+          a.fileName.localeCompare(b.fileName, undefined, {
+            numeric: true,
+            sensitivity: "base",
+          }),
+        );
+    } catch (e) {
+      console.warn(`[cd2] resolveSubtitles scan failed for ${parentDir}`, e);
+      return [];
+    }
+  }, []);
 
   /** 将 downloadUrlPath 转为完整 URL */
   const buildVideoUrl = useCallback((urlInfo: { downloadUrlPath?: string; directUrl?: string }): string => {
@@ -2214,6 +2185,24 @@ export function OfflineTasksTab() {
     }
     return urlInfo.directUrl || "";
   }, []);
+
+  const resolveSubtitleUrls = useCallback(
+    async (subtitles: SubtitleFile[]): Promise<ResolvedSubtitleFile[]> => {
+      const resolved = await Promise.all(
+        subtitles.map(async (subtitle) => {
+          try {
+            const urlInfo = await getDownloadUrlPath(subtitle.filePath, true);
+            const url = buildVideoUrl(urlInfo);
+            return url ? { ...subtitle, url } : null;
+          } catch {
+            return null;
+          }
+        }),
+      );
+      return resolved.filter((subtitle): subtitle is ResolvedSubtitleFile => subtitle !== null);
+    },
+    [buildVideoUrl],
+  );
 
   // 监听来自 artplayer 的分集 URL 解析请求
   useEffect(() => {
@@ -2250,21 +2239,7 @@ export function OfflineTasksTab() {
       const realWindow2 = (typeof unsafeWindow !== "undefined" ? unsafeWindow : window) as Window;
       try {
         const subs = await resolveSubtitles(detail.filePath);
-        // 为每个字幕文件获取 URL
-        const subsWithUrl = await Promise.all(
-          subs.map(async (s) => {
-            try {
-              const urlInfo = await getDownloadUrlPath(s.filePath, true);
-              return {
-                fileName: s.fileName,
-                filePath: s.filePath,
-                url: buildVideoUrl(urlInfo),
-              };
-            } catch {
-              return null;
-            }
-          }),
-        );
+        const subsWithUrl = await resolveSubtitleUrls(subs);
         realWindow2.dispatchEvent(
           new CustomEvent("cd2-subtitles-resolved", {
             detail: {
@@ -2293,7 +2268,7 @@ export function OfflineTasksTab() {
       realWindow.removeEventListener("cd2-resolve-video-url", onResolveVideoUrl);
       realWindow.removeEventListener("cd2-resolve-subtitles", onResolveSubtitles);
     };
-  }, [buildVideoUrl, resolveSubtitles]);
+  }, [buildVideoUrl, resolveSubtitles, resolveSubtitleUrls]);
 
   /** 播放：支持网页端和本地外部播放器串流 */
   const playFile = useCallback(
@@ -2351,21 +2326,7 @@ export function OfflineTasksTab() {
               : [[], []];
             const currentIndex = playlist.findIndex((p) => p.filePath === file.fullPathName);
 
-            // 为字幕文件获取 URL
-            const subsWithUrl = await Promise.all(
-              subtitles.map(async (s) => {
-                try {
-                  const urlInfo = await getDownloadUrlPath(s.filePath, true);
-                  return {
-                    fileName: s.fileName,
-                    filePath: s.filePath,
-                    url: buildVideoUrl(urlInfo),
-                  };
-                } catch {
-                  return null;
-                }
-              }),
-            );
+            const subsWithUrl = await resolveSubtitleUrls(subtitles);
 
             realWindow.dispatchEvent(
               new CustomEvent("cd2-play-video", {
@@ -2516,7 +2477,7 @@ export function OfflineTasksTab() {
         hide();
       }
     },
-    [message, resolveTargetFile, buildVideoUrl, resolvePlaylist, resolveSubtitles],
+    [message, resolveTargetFile, buildVideoUrl, resolvePlaylist, resolveSubtitles, resolveSubtitleUrls],
   );
 
   /** 下载：preview=false，走附件下载模式 */
@@ -2529,34 +2490,8 @@ export function OfflineTasksTab() {
           message.warning("未找到可下载的文件，请在 CloudDrive2 网页端查看。");
           return;
         }
-        const cfg = getConfig();
         const urlInfo = await getDownloadUrlPath(file.fullPathName, false);
-
-        let downloadUrl = "";
-        if (urlInfo.downloadUrlPath) {
-          let p = urlInfo.downloadUrlPath;
-          let u: URL;
-          try {
-            u = new URL(cfg.grpcBaseUrl || window.location.origin);
-          } catch {
-            u = new URL(window.location.origin);
-          }
-          p = p.replace(/(\{SCHEME\}|%7BSCHEME%7D)/gi, u.protocol.replace(":", ""));
-          p = p.replace(/(\{HOST\}|%7BHOST%7D)/gi, u.host);
-
-          if (p.startsWith("http//")) p = p.replace("http//", "http://");
-          if (p.startsWith("https//")) p = p.replace("https//", "https://");
-
-          if (p.startsWith("http://") || p.startsWith("https://")) {
-            downloadUrl = p;
-          } else {
-            const baseUrl = cfg.grpcBaseUrl.replace(/\/$/, "");
-            p = p.startsWith("/") ? p : `/${p}`;
-            downloadUrl = `${baseUrl}${p}`;
-          }
-        } else if (urlInfo.directUrl) {
-          downloadUrl = urlInfo.directUrl;
-        }
+        const downloadUrl = buildVideoUrl(urlInfo);
 
         if (downloadUrl) {
           window.open(downloadUrl, "_blank");
@@ -2569,7 +2504,7 @@ export function OfflineTasksTab() {
         hide();
       }
     },
-    [message, resolveTargetFile],
+    [message, resolveTargetFile, buildVideoUrl],
   );
 
   const createTaskFileColumns = useCallback(
@@ -2666,8 +2601,9 @@ export function OfflineTasksTab() {
                       })),
                       onClick: ({ key, domEvent }) => {
                         domEvent.stopPropagation();
-                        setDefaultPlayer(key as PlayerType);
-                        localStorage.setItem("cd2_default_player", key);
+                        const player = key as PlayerType;
+                        setDefaultPlayer(player);
+                        setPreferredPlayer(player);
                       },
                     }}
                   >
@@ -2794,7 +2730,7 @@ export function OfflineTasksTab() {
                 </Tag>
               )}
               <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-                {formatBytes(r.sizeMB)}
+                {formatMegabytes(r.sizeMB)}
               </Typography.Text>
             </Space>
           );
@@ -2841,8 +2777,9 @@ export function OfflineTasksTab() {
                         })),
                         onClick: ({ key, domEvent }) => {
                           domEvent.stopPropagation();
-                          setDefaultPlayer(key as PlayerType);
-                          localStorage.setItem("cd2_default_player", key);
+                          const player = key as PlayerType;
+                          setDefaultPlayer(player);
+                          setPreferredPlayer(player);
                         },
                       }}
                     >
@@ -2878,7 +2815,6 @@ export function OfflineTasksTab() {
     [
       copyUrl,
       closeTaskFiles,
-      formatBytes,
       removeOne,
       statusText,
       locateFile,

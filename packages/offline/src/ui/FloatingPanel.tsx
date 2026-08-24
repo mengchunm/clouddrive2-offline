@@ -460,17 +460,14 @@ export function FloatingPanel({ onOpenSettings }: FloatingPanelProps) {
     </div>
   );
 
-  const items = useMemo(
-    () => [
-      {
-        key: "offline",
-        label: "任务列表",
-        children: <OfflineTasksTab />,
-      },
-      { key: "add-offline", label: "添加任务", children: addOfflineNode },
-    ],
-    [addOfflineNode],
-  );
+  const items = [
+    {
+      key: "offline",
+      label: "任务列表",
+      children: <OfflineTasksTab />,
+    },
+    { key: "add-offline", label: "添加任务", children: addOfflineNode },
+  ];
   const activePosition = collapsed ? positions.collapsed : positions.expanded;
 
   // 收起状态：仅显示图标悬浮球

@@ -34,16 +34,41 @@ type CloudContext = {
 };
 type StoredCloudContext = CloudContext & { scope: string };
 const CLOUD_CONTEXT_CACHE_KEY = "cd2_cloud_context_v1";
+const SUBFILE_CACHE_TTL = 2_000;
+const SUBFILE_CACHE_MAX = 256;
+type CloudDriveClient = Client<typeof CloudDriveFileSrv>;
+type SubFileCacheEntry = {
+  files: CloudDriveFile[];
+  expiresAt: number;
+};
+type SubFileRequest = {
+  forceRefresh: boolean;
+  generation: number;
+  promise: Promise<CloudDriveFile[]>;
+};
 let cloudContextCache: StoredCloudContext | undefined;
 let cloudContextRequest: { scope: string; promise: Promise<CloudContext> } | undefined;
+let cloudDriveClientCache: { scope: string; client: CloudDriveClient } | undefined;
+let subFileCacheGeneration = 0;
+const subFileCache = new Map<string, SubFileCacheEntry>();
+const subFileRequests = new Map<string, SubFileRequest>();
+
+function clearSubFileCache(): void {
+  subFileCacheGeneration++;
+  subFileCache.clear();
+  subFileRequests.clear();
+}
 
 function getCloudContextScope(path: string): string {
   const cfg = getConfig();
   return `${cfg.grpcBaseUrl}\n${cfg.apiToken}\n${path}`;
 }
 
-function getCloudDriveClient(configOverride?: AppConfig): Client<typeof CloudDriveFileSrv> {
+function getCloudDriveClient(configOverride?: AppConfig): CloudDriveClient {
   const cfg = configOverride ?? getConfig();
+  const scope = `${cfg.grpcBaseUrl}\n${cfg.apiToken}`;
+  if (cloudDriveClientCache?.scope === scope) return cloudDriveClientCache.client;
+
   const authInterceptor: Interceptor = (next) => async (req) => {
     const token = cfg.apiToken;
     if (token) {
@@ -59,7 +84,9 @@ function getCloudDriveClient(configOverride?: AppConfig): Client<typeof CloudDri
     fetch: (input, init) => gmFetch(input, init),
   });
 
-  return createClient(CloudDriveFileSrv, transport);
+  const client = createClient(CloudDriveFileSrv, transport);
+  cloudDriveClientCache = { scope, client };
+  return client;
 }
 
 /** 提交离线下载任务
@@ -81,7 +108,9 @@ export async function addOffline(
 
   const client = getCloudDriveClient(cfg);
   const res = await client.addOfflineFiles(req);
-  return assertFileOperationSuccess(res, "CloudDrive2 添加离线任务失败");
+  const result = assertFileOperationSuccess(res, "CloudDrive2 添加离线任务失败");
+  clearSubFileCache();
+  return result;
 }
 
 export type SubmitOfflineResult = {
@@ -213,7 +242,9 @@ export async function removeOfflineFilesBulk(infoHashes: string[], deleteFiles: 
     path,
   });
   const result = await client.removeOfflineFiles(req);
-  return assertFileOperationSuccess(result, "CloudDrive2 删除离线任务失败");
+  const checkedResult = assertFileOperationSuccess(result, "CloudDrive2 删除离线任务失败");
+  clearSubFileCache();
+  return checkedResult;
 }
 
 /** 通过 CloudDrive2 删除一个或多个云端文件/目录（进入对应云盘回收站）。 */
@@ -225,7 +256,9 @@ export async function deleteCloudFiles(paths: string[]): Promise<FileOperationRe
     uniquePaths.length === 1
       ? await client.deleteFile(create(FileRequestSchema, { path: uniquePaths[0] }))
       : await client.deleteFiles(create(MultiFileRequestSchema, { path: uniquePaths }));
-  return assertFileOperationSuccess(result, "CloudDrive2 删除文件失败");
+  const checkedResult = assertFileOperationSuccess(result, "CloudDrive2 删除文件失败");
+  clearSubFileCache();
+  return checkedResult;
 }
 
 /**
@@ -269,20 +302,61 @@ export async function listSubFiles(
   forceRefresh: boolean = false,
   throwOnError: boolean = false,
 ): Promise<CloudDriveFile[]> {
-  const client = getCloudDriveClient();
-  const req = create(ListSubFileRequestSchema, { path, forceRefresh });
-  const files: CloudDriveFile[] = [];
-  try {
-    for await (const res of client.getSubFiles(req)) {
-      if (res.subFiles) {
-        files.push(...res.subFiles);
+  const cfg = getConfig();
+  const cacheKey = `${cfg.grpcBaseUrl}\n${cfg.apiToken}\n${path}`;
+  if (forceRefresh) {
+    subFileCache.delete(cacheKey);
+  } else {
+    const cached = subFileCache.get(cacheKey);
+    if (cached) {
+      if (cached.expiresAt > Date.now()) {
+        subFileCache.delete(cacheKey);
+        subFileCache.set(cacheKey, cached);
+        return cached.files.slice();
       }
+      subFileCache.delete(cacheKey);
     }
+  }
+
+  let requestEntry = subFileRequests.get(cacheKey);
+  if (!requestEntry || (forceRefresh && !requestEntry.forceRefresh)) {
+    requestEntry = {
+      forceRefresh,
+      generation: subFileCacheGeneration,
+      promise: (async () => {
+        const client = getCloudDriveClient(cfg);
+        const req = create(ListSubFileRequestSchema, { path, forceRefresh });
+        const files: CloudDriveFile[] = [];
+        for await (const res of client.getSubFiles(req)) {
+          if (res.subFiles) files.push(...res.subFiles);
+        }
+        return files;
+      })(),
+    };
+    subFileRequests.set(cacheKey, requestEntry);
+  }
+  const request = requestEntry.promise;
+
+  try {
+    const files = await request;
+    const isCurrentRequest = subFileRequests.get(cacheKey)?.promise === request;
+    if (isCurrentRequest) subFileRequests.delete(cacheKey);
+    if (isCurrentRequest && requestEntry.generation === subFileCacheGeneration) {
+      subFileCache.delete(cacheKey);
+      subFileCache.set(cacheKey, { files, expiresAt: Date.now() + SUBFILE_CACHE_TTL });
+    }
+    while (subFileCache.size > SUBFILE_CACHE_MAX) {
+      const oldestKey = subFileCache.keys().next().value;
+      if (oldestKey === undefined) break;
+      subFileCache.delete(oldestKey);
+    }
+    return files.slice();
   } catch (err) {
+    if (subFileRequests.get(cacheKey)?.promise === request) subFileRequests.delete(cacheKey);
     console.error("ListSubFiles Error:", err);
     if (throwOnError) throw err;
+    return [];
   }
-  return files;
 }
 
 function getStreamingClient(): Client<typeof CloudDriveFileSrv> {

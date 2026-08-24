@@ -5,9 +5,10 @@
   "scripts": {
     "build": "pnpm -r run build",
     "build:extension": "pnpm --filter clouddrive2-browser-extension build",
+    "validate:release": "node scripts/validate-release.mjs",
     "dev": "pnpm -r run dev",
     "ci": "pnpm -r run ci",
-    "test": "pnpm --filter clouddrive2-offline run test:task-search && pnpm --filter clouddrive2-offline run test:local-mount && pnpm --filter clouddrive2-offline run test:media-playlist && pnpm --filter clouddrive2-offline run test:task-root-match && pnpm --filter clouddrive2-artplayer run test:mkv-metadata && pnpm --filter clouddrive2-browser-extension run test:libav-mkv && pnpm --filter clouddrive2-browser-extension run test:audio-fallback",
+    "test": "pnpm --filter clouddrive2-offline run test:task-search && pnpm --filter clouddrive2-offline run test:local-mount && pnpm --filter clouddrive2-offline run test:media-playlist && pnpm --filter clouddrive2-offline run test:task-root-match && pnpm --filter clouddrive2-offline run test:core && pnpm --filter clouddrive2-artplayer run test:mkv-metadata && pnpm --filter clouddrive2-artplayer run test:player-utils && pnpm --filter clouddrive2-browser-extension run test:libav-mkv && pnpm --filter clouddrive2-browser-extension run test:audio-fallback",
     "typecheck": "pnpm -r --if-present run typecheck",
     "lint": "pnpm -r run lint",
     "format": "pnpm -r run format"
