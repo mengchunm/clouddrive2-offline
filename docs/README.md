@@ -6,6 +6,7 @@
 
 - [项目架构](architecture.md)：包职责、运行时边界、数据流和存储分层。
 - [浏览器扩展媒体播放固定方案](browser-extension-media-pipeline.md)：当前已验证的音频、字幕、Range 调度和字幕记忆基线，后续媒体修改必须遵守。
+- [浏览器扩展视频解码与渲染固定方案](browser-extension-video-decoding.md)：WebCodecs 软件/硬件解码、顺序样本调度、Canvas 原子交换、资源关闭和故障保护的完整方法。
 - [浏览器扩展字幕实现](browser-extension-subtitles.md)：远程 MKV/MP4 字幕、libav.js 与 libass 的实现约束。
 - [浏览器扩展音频兼容](browser-extension-audio.md)：远程 MKV AC-3/E-AC-3 的纯扩展解码与同步约束。
 - [Windows 本地目录功能](native-messaging.md)：本地文件定位脚本、Native Messaging 和安全边界。

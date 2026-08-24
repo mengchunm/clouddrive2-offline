@@ -141,6 +141,11 @@ interface PlaylistSelectorItem {
 	filePath: string;
 }
 
+interface VideoDecoderSelectorItem {
+	html: string;
+	mode: VideoDecoderMode;
+}
+
 interface AudioTrackSelectorItem {
 	html: string;
 	index: number;
@@ -190,6 +195,7 @@ let _activeLibavSubtitle: ActiveLibavSubtitle | null = null;
 const CONTAINER_ID = "cd2-artplayer-container";
 const OVERLAY_ID = "cd2-artplayer-overlay";
 const OVERLAY_TITLE_ID = "cd2-artplayer-title";
+const NETWORK_SPEED_ID = "cd2-player-network-speed";
 const DANMAKU_PANEL_ID = "cd2-danmaku-panel";
 const DANMAKU_PANEL_TITLE_ID = "cd2-danmaku-panel-title";
 const SHOW_DANMAKU_HEATMAP_KEY = "cd2_show_danmaku_heatmap";
@@ -201,6 +207,10 @@ const PLAYER_WINDOW_MARGIN = 12;
 const DEFAULT_PLAYER_ASPECT_RATIO = 16 / 9;
 const MIN_PLAYER_WINDOW_WIDTH = 480;
 const MIN_PLAYER_WINDOW_HEIGHT = 270;
+const NETWORK_SPEED_SAMPLE_INTERVAL_MS = 200;
+const NETWORK_SPEED_SAMPLE_WINDOW_MS = 2000;
+const NETWORK_SPEED_MIN_SAMPLE_ELAPSED_MS = 200;
+const NETWORK_SPEED_STALE_AFTER_MS = 1000;
 
 function queryRequired<T extends Element>(
 	root: ParentNode,
@@ -274,18 +284,20 @@ function clampPlayerWindowLayout(
 		1,
 		window.innerHeight - PLAYER_WINDOW_MARGIN * 2,
 	);
-	const maxWidth = Math.min(availableWidth, availableHeight * ratio);
-	const minWidth = Math.min(
-		maxWidth,
-		Math.max(MIN_PLAYER_WINDOW_WIDTH, MIN_PLAYER_WINDOW_HEIGHT * ratio),
-	);
+	const maxWidth = availableWidth;
+	const maxHeight = availableHeight;
 	const preferredWidth = Number.isFinite(layout.width)
 		? (layout.width ?? 720)
 		: Number.isFinite(layout.height)
 			? (layout.height ?? 405) * ratio
 			: 720;
+	const preferredHeight = Number.isFinite(layout.height)
+		? (layout.height ?? 405)
+		: preferredWidth / ratio;
+	const minWidth = Math.min(maxWidth, MIN_PLAYER_WINDOW_WIDTH);
+	const minHeight = Math.min(maxHeight, MIN_PLAYER_WINDOW_HEIGHT);
 	const width = Math.min(maxWidth, Math.max(minWidth, preferredWidth));
-	const height = width / ratio;
+	const height = Math.min(maxHeight, Math.max(minHeight, preferredHeight));
 	return {
 		left: Math.min(
 			Math.max(
@@ -315,12 +327,16 @@ function clampPlayerWindowLayout(
 function getPlayerWindowLayout(
 	aspectRatio = DEFAULT_PLAYER_ASPECT_RATIO,
 ): PlayerWindowLayout {
-	const width = Math.min(
-		720,
+	const availableWidth = Math.max(
+		1,
 		window.innerWidth - PLAYER_WINDOW_MARGIN * 2,
-		(window.innerHeight - PLAYER_WINDOW_MARGIN * 2) * aspectRatio,
 	);
-	const height = width / aspectRatio;
+	const availableHeight = Math.max(
+		1,
+		window.innerHeight - PLAYER_WINDOW_MARGIN * 2,
+	);
+	const width = Math.min(720, availableWidth, availableHeight * aspectRatio);
+	const height = Math.min(availableHeight, width / aspectRatio);
 	const fallback = {
 		left: window.innerWidth - width - PLAYER_WINDOW_MARGIN,
 		top: window.innerHeight - height - PLAYER_WINDOW_MARGIN,
@@ -354,11 +370,14 @@ interface DanmakuPreferences {
 	mode: 0 | 1 | 2;
 }
 
+type VideoDecoderMode = "native" | "software" | "hardware";
+
 interface PlayerPreferences {
 	volume: number;
 	muted: boolean;
 	playbackRate: number;
 	aspectRatio: "default" | `${number}:${number}`;
+	videoDecoder: VideoDecoderMode;
 }
 
 interface PlayerRestoreState {
@@ -566,6 +585,12 @@ function getPlayerPreferences(): PlayerPreferences {
 		PLAYER_PREFERENCES_KEY,
 		null,
 	);
+	const videoDecoder: VideoDecoderMode =
+		stored?.videoDecoder === "native" ||
+		stored?.videoDecoder === "hardware" ||
+		stored?.videoDecoder === "software"
+			? stored.videoDecoder
+			: "software";
 	return {
 		volume:
 			typeof stored?.volume === "number" &&
@@ -583,6 +608,7 @@ function getPlayerPreferences(): PlayerPreferences {
 			/^(?:default|\d+(?:[.]\d+)?:\d+(?:[.]\d+)?)$/.test(stored.aspectRatio)
 				? (stored.aspectRatio as PlayerPreferences["aspectRatio"])
 				: "default",
+		videoDecoder,
 	};
 }
 
@@ -629,6 +655,15 @@ function injectStyles() {
       opacity: 1; outline: 2px solid #58a6ff; outline-offset: 2px;
     }
     #${CONTAINER_ID} { width: 100%; height: 100%; min-height: 0; }
+    #${CONTAINER_ID} .art-loading { flex-direction: column; gap: 8px; }
+    #${CONTAINER_ID} .cd2-player-network-speed {
+      display: none; color: rgba(255,255,255,.9); font-size: 12px;
+      line-height: 1.35; font-variant-numeric: tabular-nums;
+      pointer-events: none; user-select: none;
+    }
+    #${CONTAINER_ID} .cd2-player-network-speed.cd2-player-network-speed-visible {
+      display: block;
+    }
     #${CONTAINER_ID} .art-video-player { container-type: inline-size; }
     #${OVERLAY_ID} .cd2-player-resize-handle { position: absolute; z-index: 130; touch-action: none; }
     #${OVERLAY_ID} .cd2-player-resize-edge { z-index: 129; }
@@ -726,6 +761,261 @@ function injectStyles() {
     }
   `;
 	document.head.appendChild(style);
+}
+
+interface VideoNetworkSpeedTracker {
+	destroy(): void;
+}
+
+function formatNetworkSpeed(bytesPerSecond: number): string {
+	const units = ["B/s", "KB/s", "MB/s", "GB/s"];
+	let value = bytesPerSecond;
+	let unitIndex = 0;
+	while (value >= 1000 && unitIndex < units.length - 1) {
+		value /= 1000;
+		unitIndex += 1;
+	}
+	const digits = value >= 100 ? 0 : value >= 10 ? 1 : 2;
+	return `${value.toFixed(digits)} ${units[unitIndex]}`;
+}
+
+function getBufferedDuration(video: HTMLVideoElement): number {
+	let duration = 0;
+	try {
+		for (let index = 0; index < video.buffered.length; index += 1) {
+			const start = video.buffered.start(index);
+			const end = video.buffered.end(index);
+			if (Number.isFinite(start) && Number.isFinite(end) && end > start) {
+				duration += end - start;
+			}
+		}
+	} catch {
+		// The media element may change its buffered ranges while they are read.
+	}
+	return duration;
+}
+
+function getResourceTimingBytes(sourceUrl: string): number | null {
+	if (!sourceUrl || typeof performance.getEntriesByName !== "function") {
+		return null;
+	}
+	let bytes = 0;
+	for (const entry of performance.getEntriesByName(sourceUrl, "resource")) {
+		const resource = entry as PerformanceResourceTiming;
+		bytes = Math.max(
+			bytes,
+			resource.transferSize || 0,
+			resource.encodedBodySize || 0,
+		);
+	}
+	return bytes > 0 ? bytes : null;
+}
+
+/**
+ * Estimates the native video download rate from the growth of its buffered
+ * ranges. Native media requests do not expose a byte-progress callback, so a
+ * known file size is mapped to buffered duration; Resource Timing is used as a
+ * best-effort fallback when the browser exposes media byte counts.
+ */
+function createVideoNetworkSpeedTracker(
+	video: HTMLVideoElement,
+	sourceUrl: string,
+	fileSize: number | undefined,
+	indicator: HTMLElement,
+): VideoNetworkSpeedTracker {
+	const knownFileSize =
+		typeof fileSize === "number" && Number.isFinite(fileSize) && fileSize > 0
+			? fileSize
+			: undefined;
+	const samples: Array<{ time: number; bytes: number }> = [];
+	let latestSpeed: number | null = null;
+	let lastBytesAt = 0;
+	let hideTimer = 0;
+	let updateTimer = 0;
+	let visible = true;
+	let buffering = true;
+	let destroyed = false;
+
+	const renderIndicator = () => {
+		const speed = latestSpeed;
+		const hasSpeed = speed !== null && speed > 0;
+		indicator.textContent = hasSpeed ? formatNetworkSpeed(speed) : "";
+		const shouldShow = visible && hasSpeed;
+		indicator.classList.toggle("cd2-player-network-speed-visible", shouldShow);
+		indicator.setAttribute("aria-hidden", String(!shouldShow));
+	};
+	const setIndicatorVisibility = (nextVisible: boolean) => {
+		visible = nextVisible;
+		renderIndicator();
+	};
+
+	const readLoadedBytes = (): number | null => {
+		if (
+			knownFileSize !== undefined &&
+			Number.isFinite(video.duration) &&
+			video.duration > 0
+		) {
+			const bufferedDuration = getBufferedDuration(video);
+			if (bufferedDuration > 0) {
+				return Math.min(
+					knownFileSize,
+					(bufferedDuration / video.duration) * knownFileSize,
+				);
+			}
+		}
+		return getResourceTimingBytes(video.currentSrc || sourceUrl);
+	};
+
+	const update = () => {
+		if (destroyed) return;
+		const now = performance.now();
+		const loadedBytes = readLoadedBytes();
+		if (loadedBytes !== null && Number.isFinite(loadedBytes)) {
+			const previous = samples[samples.length - 1];
+			if (previous && loadedBytes + 1 < previous.bytes) {
+				samples.length = 0;
+				latestSpeed = null;
+				lastBytesAt = 0;
+			}
+			samples.push({ time: now, bytes: loadedBytes });
+			while (
+				samples.length > 1 &&
+				now - samples[0].time > NETWORK_SPEED_SAMPLE_WINDOW_MS
+			) {
+				samples.shift();
+			}
+			const first = samples[0];
+			const elapsed = first ? now - first.time : 0;
+			const delta = first ? loadedBytes - first.bytes : 0;
+			if (
+				first &&
+				elapsed >= NETWORK_SPEED_MIN_SAMPLE_ELAPSED_MS &&
+				delta > 0
+			) {
+				latestSpeed = (delta * 1000) / elapsed;
+				lastBytesAt = now;
+			} else if (
+				lastBytesAt > 0 &&
+				now - lastBytesAt > NETWORK_SPEED_STALE_AFTER_MS
+			) {
+				latestSpeed = null;
+			}
+		}
+
+		renderIndicator();
+	};
+
+	const startUpdateTimer = () => {
+		if (updateTimer !== 0) return;
+		updateTimer = window.setInterval(update, NETWORK_SPEED_SAMPLE_INTERVAL_MS);
+	};
+	const stopUpdateTimer = () => {
+		if (updateTimer === 0) return;
+		window.clearInterval(updateTimer);
+		updateTimer = 0;
+	};
+
+	const show = () => {
+		window.clearTimeout(hideTimer);
+		setIndicatorVisibility(true);
+		startUpdateTimer();
+		update();
+	};
+	const hideSoon = () => {
+		window.clearTimeout(hideTimer);
+		hideTimer = window.setTimeout(() => {
+			if (!buffering && video.readyState >= 3) {
+				setIndicatorVisibility(false);
+				stopUpdateTimer();
+			}
+		}, 1200);
+	};
+	const reset = () => {
+		samples.length = 0;
+		latestSpeed = null;
+		lastBytesAt = 0;
+		show();
+	};
+	const onLoadStart = () => {
+		buffering = true;
+		reset();
+	};
+	const onProgress = () => {
+		buffering = video.readyState < 3;
+		show();
+		if (!buffering) hideSoon();
+	};
+	const onWaiting = () => {
+		buffering = true;
+		show();
+	};
+	const onStalled = () => {
+		buffering = true;
+		show();
+	};
+	const onReady = () => {
+		buffering = false;
+		update();
+		hideSoon();
+	};
+	const onSeeking = () => {
+		buffering = true;
+		reset();
+	};
+	const onSeeked = () => {
+		if (video.readyState >= 3) {
+			buffering = false;
+			hideSoon();
+		}
+	};
+	const onEmptied = () => {
+		buffering = true;
+		reset();
+	};
+	const onMetadata = () => {
+		if (visible) update();
+	};
+
+	video.addEventListener("loadstart", onLoadStart);
+	video.addEventListener("progress", onProgress);
+	video.addEventListener("waiting", onWaiting);
+	video.addEventListener("stalled", onStalled);
+	video.addEventListener("canplay", onReady);
+	video.addEventListener("canplaythrough", onReady);
+	video.addEventListener("playing", onReady);
+	video.addEventListener("suspend", onReady);
+	video.addEventListener("seeking", onSeeking);
+	video.addEventListener("seeked", onSeeked);
+	video.addEventListener("emptied", onEmptied);
+	video.addEventListener("loadedmetadata", onMetadata);
+	video.addEventListener("durationchange", onMetadata);
+	show();
+	if (video.readyState >= 3) {
+		buffering = false;
+		hideSoon();
+	}
+
+	return {
+		destroy() {
+			if (destroyed) return;
+			destroyed = true;
+			window.clearTimeout(hideTimer);
+			stopUpdateTimer();
+			video.removeEventListener("loadstart", onLoadStart);
+			video.removeEventListener("progress", onProgress);
+			video.removeEventListener("waiting", onWaiting);
+			video.removeEventListener("stalled", onStalled);
+			video.removeEventListener("canplay", onReady);
+			video.removeEventListener("canplaythrough", onReady);
+			video.removeEventListener("playing", onReady);
+			video.removeEventListener("suspend", onReady);
+			video.removeEventListener("seeking", onSeeking);
+			video.removeEventListener("seeked", onSeeked);
+			video.removeEventListener("emptied", onEmptied);
+			video.removeEventListener("loadedmetadata", onMetadata);
+			video.removeEventListener("durationchange", onMetadata);
+		},
+	};
 }
 
 // ─── 弹幕面板 ───────────────────────────────────────────
@@ -998,8 +1288,7 @@ function createOverlay(title: string) {
 	document.body.appendChild(overlay);
 	overlayEl = overlay;
 
-	let playerAspectRatio = DEFAULT_PLAYER_ASPECT_RATIO;
-	let layout = getPlayerWindowLayout(playerAspectRatio);
+	let layout = getPlayerWindowLayout();
 	const getCurrentWindowLayout = () => ({ ...layout });
 	_getCurrentPlayerWindowLayout = getCurrentWindowLayout;
 	const applyLayout = () => {
@@ -1041,7 +1330,7 @@ function createOverlay(title: string) {
 		if (operation.mode === "drag") {
 			next.left += deltaX;
 			next.top += deltaY;
-			layout = clampPlayerWindowLayout(next, playerAspectRatio);
+			layout = clampPlayerWindowLayout(next);
 		} else {
 			const resizeFromLeft = operation.mode.includes("left");
 			const resizeFromRight = operation.mode.includes("right");
@@ -1049,70 +1338,46 @@ function createOverlay(title: string) {
 			const resizeFromBottom = operation.mode.includes("bottom");
 			const resizeHorizontally = resizeFromLeft || resizeFromRight;
 			const resizeVertically = resizeFromTop || resizeFromBottom;
-			const horizontalWidth =
-				operation.startLayout.width + deltaX * (resizeFromLeft ? -1 : 1);
-			const verticalWidth =
-				(operation.startLayout.height + deltaY * (resizeFromTop ? -1 : 1)) *
-				playerAspectRatio;
 			const requestedWidth = resizeHorizontally
-				? resizeVertically &&
-					Math.abs(verticalWidth - operation.startLayout.width) >
-						Math.abs(horizontalWidth - operation.startLayout.width)
-					? verticalWidth
-					: horizontalWidth
-				: verticalWidth;
+				? operation.startLayout.width + deltaX * (resizeFromLeft ? -1 : 1)
+				: operation.startLayout.width;
+			const requestedHeight = resizeVertically
+				? operation.startLayout.height + deltaY * (resizeFromTop ? -1 : 1)
+				: operation.startLayout.height;
 			const fixedRight =
 				operation.startLayout.left + operation.startLayout.width;
 			const fixedBottom =
 				operation.startLayout.top + operation.startLayout.height;
-			const centerX =
-				operation.startLayout.left + operation.startLayout.width / 2;
-			const centerY =
-				operation.startLayout.top + operation.startLayout.height / 2;
-			const maxWidthByX = resizeFromLeft
+			const maxWidth = resizeFromLeft
 				? fixedRight - PLAYER_WINDOW_MARGIN
 				: resizeFromRight
 					? window.innerWidth -
 						operation.startLayout.left -
 						PLAYER_WINDOW_MARGIN
-					: 2 *
-						Math.min(
-							centerX - PLAYER_WINDOW_MARGIN,
-							window.innerWidth - PLAYER_WINDOW_MARGIN - centerX,
-						);
-			const maxHeightByY = resizeFromTop
+					: operation.startLayout.width;
+			const maxHeight = resizeFromTop
 				? fixedBottom - PLAYER_WINDOW_MARGIN
 				: resizeFromBottom
 					? window.innerHeight -
 						operation.startLayout.top -
 						PLAYER_WINDOW_MARGIN
-					: 2 *
-						Math.min(
-							centerY - PLAYER_WINDOW_MARGIN,
-							window.innerHeight - PLAYER_WINDOW_MARGIN - centerY,
-						);
-			const maxWidthByY = maxHeightByY * playerAspectRatio;
-			const maxWidth = Math.max(1, Math.min(maxWidthByX, maxWidthByY));
-			const minWidth = Math.min(
-				maxWidth,
-				Math.max(
-					MIN_PLAYER_WINDOW_WIDTH,
-					MIN_PLAYER_WINDOW_HEIGHT * playerAspectRatio,
-				),
+					: operation.startLayout.height;
+			const minWidth = Math.min(Math.max(1, maxWidth), MIN_PLAYER_WINDOW_WIDTH);
+			const minHeight = Math.min(
+				Math.max(1, maxHeight),
+				MIN_PLAYER_WINDOW_HEIGHT,
 			);
-			const width = Math.min(maxWidth, Math.max(minWidth, requestedWidth));
-			const height = width / playerAspectRatio;
+			const width = Math.min(
+				Math.max(1, maxWidth),
+				Math.max(minWidth, requestedWidth),
+			);
+			const height = Math.min(
+				Math.max(1, maxHeight),
+				Math.max(minHeight, requestedHeight),
+			);
 			layout = {
-				left: resizeFromLeft
-					? fixedRight - width
-					: resizeFromRight
-						? operation.startLayout.left
-						: centerX - width / 2,
-				top: resizeFromTop
-					? fixedBottom - height
-					: resizeFromBottom
-						? operation.startLayout.top
-						: centerY - height / 2,
+				left: resizeFromLeft ? fixedRight - width : operation.startLayout.left,
+				top: resizeFromTop ? fixedBottom - height : operation.startLayout.top,
 				width,
 				height,
 			};
@@ -1190,7 +1455,7 @@ function createOverlay(title: string) {
 	window.addEventListener("pointerup", finishPointerOperation);
 	window.addEventListener("pointercancel", finishPointerOperation);
 	const onWindowResize = () => {
-		layout = clampPlayerWindowLayout(layout, playerAspectRatio);
+		layout = clampPlayerWindowLayout(layout);
 		applyLayout();
 	};
 	const saveLayoutBeforePageUnload = () => savePlayerWindowLayout(layout);
@@ -1269,30 +1534,11 @@ function createOverlay(title: string) {
 		playerRoot.appendChild(header);
 		setChromeVisible(true);
 	};
-	const setVideoAspectRatio = (aspectRatio: number) => {
-		if (!Number.isFinite(aspectRatio) || aspectRatio <= 0) return;
-		const centerX = layout.left + layout.width / 2;
-		const centerY = layout.top + layout.height / 2;
-		playerAspectRatio = aspectRatio;
-		layout = clampPlayerWindowLayout(layout, playerAspectRatio);
-		layout = clampPlayerWindowLayout(
-			{
-				...layout,
-				left: centerX - layout.width / 2,
-				top: centerY - layout.height / 2,
-			},
-			playerAspectRatio,
-		);
-		applyLayout();
-		savePlayerWindowLayout(layout);
-	};
-
 	return {
 		container,
 		panelEls,
 		mountWindowChrome,
 		setChromeVisible,
-		setVideoAspectRatio,
 		focusInitial: () => closeBtn.focus({ preventScroll: true }),
 	};
 }
@@ -1504,7 +1750,6 @@ export async function openPlayer(
 		panelEls,
 		mountWindowChrome,
 		setChromeVisible,
-		setVideoAspectRatio,
 		focusInitial,
 	} = createOverlay(displayTitle);
 	const sessionNonce = ++_playerSessionNonce;
@@ -1644,8 +1889,120 @@ export async function openPlayer(
 		if (el) el.textContent = danmakuStatusText;
 	}
 
+	const playerPreferences = getPlayerPreferences();
+	const alternativeVideoDecoderEnabled =
+		isExtensionBuild &&
+		/\.(?:mp4|mkv|m4v|mov|webm|avi|rmvb|flv|ts|m2ts|mpeg|mpg|iso)$/i.test(
+			fileName,
+		);
+	let videoDecoderMode: VideoDecoderMode = alternativeVideoDecoderEnabled
+		? playerPreferences.videoDecoder
+		: "native";
+	let mkvMetadataExtractionTimer = 0;
+	let mp4SubtitleExtractionTimer = 0;
+	const setVideoDecoderMode = (mode: VideoDecoderMode) => {
+		videoDecoderMode = mode;
+		playerPreferences.videoDecoder = mode;
+		GM_setValue(PLAYER_PREFERENCES_KEY, {
+			...getPlayerPreferences(),
+			videoDecoder: mode,
+		});
+		Win.dispatchEvent(
+			new CustomEvent("cd2-video-renderer-set", {
+				detail: { mode, sessionNonce },
+			}),
+		);
+	};
+	let videoRendererWarmupCleanup: (() => void) | null = null;
+	const videoRendererReady =
+		alternativeVideoDecoderEnabled && videoDecoderMode !== "native"
+			? new Promise<void>((resolve) => {
+					let settled = false;
+					let timeoutId = 0;
+					const finish = () => {
+						if (settled) return;
+						settled = true;
+						window.clearTimeout(timeoutId);
+						Win.removeEventListener("cd2-video-renderer-status", onStatus);
+						if (videoRendererWarmupCleanup === finish)
+							videoRendererWarmupCleanup = null;
+						resolve();
+					};
+					const onStatus = (event: Event) => {
+						const detail = (
+							event as CustomEvent<{
+								sessionNonce?: number;
+								state?: string;
+							}>
+						).detail;
+						if (
+							detail?.sessionNonce === sessionNonce &&
+							(detail.state === "ready" ||
+								detail.state === "error" ||
+								detail.state === "closed")
+						)
+							finish();
+					};
+					videoRendererWarmupCleanup = finish;
+					Win.addEventListener("cd2-video-renderer-status", onStatus);
+					timeoutId = window.setTimeout(finish, 15_000);
+				})
+			: Promise.resolve();
+	const deferMediaMetadata = (
+		task: () => void,
+		setTimer: (timer: number) => void,
+	): void => {
+		if (!alternativeVideoDecoderEnabled) {
+			task();
+			return;
+		}
+		const schedule = () => {
+			if (!isCurrentSession()) return;
+			setTimer(
+				window.setTimeout(() => {
+					setTimer(0);
+					task();
+				}, 750),
+			);
+		};
+		if (videoDecoderMode !== "native") void videoRendererReady.then(schedule);
+		else if (currentPlayer?.isReady) schedule();
+		else currentPlayer?.once("ready", schedule);
+	};
+
 	// 构建控制栏
-	const controls: Artplayer["option"]["controls"] = [
+	const controls: Artplayer["option"]["controls"] = [];
+	if (alternativeVideoDecoderEnabled) {
+		controls.push({
+			name: "video-decoder-selector",
+			position: "right",
+			index: 5,
+			html: `<div style="display:flex;align-items:center;gap:4px;padding:0 6px;cursor:pointer" title="视频解码器">解码</div>`,
+			selector: [
+				{
+					default: videoDecoderMode === "software",
+					html: "软件解码",
+					mode: "software",
+				},
+				{
+					default: videoDecoderMode === "hardware",
+					html: "硬件解码",
+					mode: "hardware",
+				},
+				{
+					default: videoDecoderMode === "native",
+					html: "浏览器原生",
+					mode: "native",
+				},
+			],
+			onSelect: (selector) => {
+				const item = selector as VideoDecoderSelectorItem;
+				setVideoDecoderMode(item.mode);
+				return item.html;
+			},
+		});
+	}
+	controls.push(
 		{
 			name: "subtitle-selector",
 			position: "right",
@@ -1698,7 +2055,7 @@ export async function openPlayer(
 				);
 			},
 		},
-	];
+	);
 
 	if (playlist && playlist.length > 1) {
 		controls.push({
@@ -1803,7 +2160,6 @@ export async function openPlayer(
 		}
 
 	const danmakuPreferences = getDanmakuPreferences();
-	const playerPreferences = getPlayerPreferences();
 	const rememberedVideo =
 		videoMemory.get(mediaIdentity) ?? videoMemory.get(url);
 	const restoreTime = Math.max(
@@ -1861,6 +2217,34 @@ export async function openPlayer(
 			}),
 		],
 	});
+	if (alternativeVideoDecoderEnabled) {
+		Win.dispatchEvent(
+			new CustomEvent("cd2-video-renderer-open", {
+				detail: {
+					video: currentPlayer.video,
+					container: currentPlayer.template.$player,
+					videoUrl: url,
+					fileSize,
+					mode: videoDecoderMode,
+					sessionNonce,
+				},
+			}),
+		);
+	}
+	const networkSpeed = document.createElement("span");
+	networkSpeed.id = NETWORK_SPEED_ID;
+	networkSpeed.className = "cd2-player-network-speed";
+	networkSpeed.setAttribute("role", "status");
+	networkSpeed.setAttribute("aria-live", "polite");
+	networkSpeed.setAttribute("aria-atomic", "true");
+	networkSpeed.setAttribute("aria-hidden", "true");
+	currentPlayer.template.$loading.appendChild(networkSpeed);
+	const networkSpeedTracker = createVideoNetworkSpeedTracker(
+		currentPlayer.video,
+		url,
+		fileSize,
+		networkSpeed,
+	);
 	const browserAudioFallback = shouldUseBrowserAudioFallback
 		? new BrowserAudioFallback({
 				video: currentPlayer.video,
@@ -1944,15 +2328,7 @@ export async function openPlayer(
 	updateResponsiveControls();
 	window.requestAnimationFrame(updateResponsiveControls);
 	const onPlayerControl = (visible: boolean) => setChromeVisible(visible);
-	const onVideoMetadata = () => {
-		const video = currentPlayer?.video;
-		if (video?.videoWidth && video.videoHeight) {
-			setVideoAspectRatio(video.videoWidth / video.videoHeight);
-		}
-	};
 	currentPlayer.on("control", onPlayerControl);
-	currentPlayer.on("video:loadedmetadata", onVideoMetadata);
-	onVideoMetadata();
 	currentPlayer.muted = restoreState?.muted ?? playerPreferences.muted;
 	currentPlayer.playbackRate =
 		restoreState?.playbackRate ?? playerPreferences.playbackRate;
@@ -1975,6 +2351,7 @@ export async function openPlayer(
 			muted: currentPlayer.muted,
 			playbackRate: currentPlayer.playbackRate,
 			aspectRatio: currentPlayer.aspectRatio,
+			videoDecoder: videoDecoderMode,
 		} satisfies PlayerPreferences);
 	};
 	currentPlayer.on("artplayerPluginDanmuku:config", onDanmakuConfig);
@@ -2071,6 +2448,23 @@ export async function openPlayer(
 	window.addEventListener("beforeunload", onPageUnload);
 
 	_cleanupBeforeDestroy = () => {
+		videoRendererWarmupCleanup?.();
+		if (mkvMetadataExtractionTimer !== 0) {
+			window.clearTimeout(mkvMetadataExtractionTimer);
+			mkvMetadataExtractionTimer = 0;
+		}
+		if (mp4SubtitleExtractionTimer !== 0) {
+			window.clearTimeout(mp4SubtitleExtractionTimer);
+			mp4SubtitleExtractionTimer = 0;
+		}
+		if (alternativeVideoDecoderEnabled) {
+			Win.dispatchEvent(
+				new CustomEvent("cd2-video-renderer-close", {
+					detail: { sessionNonce },
+				}),
+			);
+		}
+		networkSpeedTracker.destroy();
 		browserAudioFallback?.destroy();
 		window.clearInterval(progressSaveTimer);
 		responsiveControlsObserver.disconnect();
@@ -2089,7 +2483,6 @@ export async function openPlayer(
 		currentPlayer?.off("video:ratechange", savePlayerPreferences);
 		currentPlayer?.off("aspectRatio", savePlayerPreferences);
 		currentPlayer?.off("control", onPlayerControl);
-		currentPlayer?.off("video:loadedmetadata", onVideoMetadata);
 		currentPlayer?.off("video:play", onPlaybackStateChange);
 		currentPlayer?.off("video:pause", onPlaybackStateChange);
 		currentPlayer?.off("video:seeking", onSubtitleSeeking);
@@ -2132,12 +2525,19 @@ export async function openPlayer(
 		.toLowerCase()
 		.match(/\.([^.?#]+)(?:[?#]|$)/)?.[1];
 	if (mediaExtension === "mkv") {
-		extractMkvMetadata(url).then((mkvSubs) => {
+		const startMkvMetadataExtraction = () => {
+			mkvMetadataExtractionTimer = 0;
 			if (!isCurrentSession()) return;
-			if (mkvSubs.length > 0) {
-				_mkvExtractedSubs.push(...mkvSubs);
-				applySubtitles(_currentSubtitles);
-			}
+			extractMkvMetadata(url).then((mkvSubs) => {
+				if (!isCurrentSession()) return;
+				if (mkvSubs.length > 0) {
+					_mkvExtractedSubs.push(...mkvSubs);
+					applySubtitles(_currentSubtitles);
+				}
+			});
+		};
+		deferMediaMetadata(startMkvMetadataExtraction, (timer) => {
+			mkvMetadataExtractionTimer = timer;
 		});
 	}
 	if (
@@ -2145,28 +2545,37 @@ export async function openPlayer(
 		mediaExtension === "m4v" ||
 		mediaExtension === "mov"
 	) {
-		extractMp4Subtitle(url, gmFetchAdapter)
-			.then((mp4Subs) => {
-				if (!isCurrentSession()) {
-					for (const subtitle of mp4Subs) URL.revokeObjectURL(subtitle.url);
-					return;
-				}
-				if (mp4Subs.length > 0) {
-					const subs = mp4Subs.map((s) => ({
-						url: s.url,
-						fileName: `[MP4内嵌] ${s.name} (${s.ext.toUpperCase()})`,
-						isLocal: false,
-						ext: s.ext,
-						isDeferred: false,
-					}));
-					_mkvExtractedSubs.push(...subs);
-					for (const s of subs) {
-						_blobUrlExtCache.set(s.url, s.ext);
+		const startMp4SubtitleExtraction = () => {
+			mp4SubtitleExtractionTimer = 0;
+			if (!isCurrentSession()) return;
+			extractMp4Subtitle(url, gmFetchAdapter)
+				.then((mp4Subs) => {
+					if (!isCurrentSession()) {
+						for (const subtitle of mp4Subs) URL.revokeObjectURL(subtitle.url);
+						return;
 					}
-					applySubtitles(_currentSubtitles);
-				}
-			})
-			.catch((e) => console.warn("[cd2-artplayer] MP4内嵌提取失败:", e));
+					if (mp4Subs.length > 0) {
+						const subs = mp4Subs.map((s) => ({
+							url: s.url,
+							fileName: `[MP4内嵌] ${s.name} (${s.ext.toUpperCase()})`,
+							isLocal: false,
+							ext: s.ext,
+							isDeferred: false,
+						}));
+						_mkvExtractedSubs.push(...subs);
+						for (const s of subs) {
+							_blobUrlExtCache.set(s.url, s.ext);
+						}
+						applySubtitles(_currentSubtitles);
+					}
+				})
+				.catch((e) => console.warn("[cd2-artplayer] MP4内嵌提取失败:", e));
+		};
+		// Let the native/custom video path establish its first frame before the
+		// second MP4 moov reader competes for the same slow Range source.
+		deferMediaMetadata(startMp4SubtitleExtraction, (timer) => {
+			mp4SubtitleExtractionTimer = timer;
+		});
 	}
 
 	// 3. 初始化音频轨道菜单

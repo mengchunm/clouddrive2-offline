@@ -2,6 +2,30 @@ import path from "node:path";
 import react from "@vitejs/plugin-react-swc";
 import { defineConfig } from "vite";
 
+function patchLibassCanvasReadback() {
+	return {
+		name: "cd2-libass-will-read-frequently",
+		enforce: "pre" as const,
+		transform(code: string, id: string) {
+			const normalizedId = id.replaceAll("\\", "/").split("?", 1)[0];
+			if (!normalizedId.endsWith("/libass-wasm/dist/js/subtitles-octopus.js")) {
+				return null;
+			}
+			const patchedCode = code.replace(
+				/getContext\(\s*(['"])2d\1\s*\)/g,
+				(_match, quote: string) =>
+					`getContext(${quote}2d${quote}, { willReadFrequently: true })`,
+			);
+			if (patchedCode === code && code.includes("getImageData")) {
+				throw new Error(
+					"libass Canvas readback patch no longer matches subtitles-octopus.js",
+				);
+			}
+			return patchedCode === code ? null : { code: patchedCode, map: null };
+		},
+	};
+}
+
 export default defineConfig({
 	publicDir: "public",
 	define: {
@@ -21,7 +45,7 @@ export default defineConfig({
 			{ find: "@", replacement: path.resolve(__dirname, "../offline/src") },
 		],
 	},
-	plugins: [react()],
+	plugins: [patchLibassCanvasReadback(), react()],
 	build: {
 		outDir: "build",
 		emptyOutDir: true,

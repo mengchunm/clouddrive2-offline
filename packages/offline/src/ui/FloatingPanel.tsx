@@ -44,6 +44,8 @@ type ResizeState = {
 };
 
 const VIEWPORT_MARGIN = 8;
+const PANEL_DRAG_EXCLUDED_SELECTOR =
+  "button, input, textarea, select, option, a, label, [role='button'], [role='checkbox'], [role='combobox'], [role='tab'], [contenteditable='true'], .ant-tabs-tab";
 
 export function FloatingPanel({ onOpenSettings }: FloatingPanelProps) {
   const { message } = AntdApp.useApp();
@@ -171,6 +173,27 @@ export function FloatingPanel({ onOpenSettings }: FloatingPanelProps) {
       setDragging(true);
     },
     [applyPosition, clampPosition, collapsed],
+  );
+
+  const startPanelDrag = useCallback(
+    (event: ReactPointerEvent<HTMLElement>) => {
+      if (event.target instanceof Element) {
+        if (event.target.closest(PANEL_DRAG_EXCLUDED_SELECTOR)) return;
+        const scrollable = event.target.closest<HTMLElement>(".ant-table-body");
+        if (scrollable) {
+          const bounds = scrollable.getBoundingClientRect();
+          const verticalScrollbarWidth = scrollable.offsetWidth - scrollable.clientWidth;
+          const horizontalScrollbarHeight = scrollable.offsetHeight - scrollable.clientHeight;
+          const inVerticalScrollbar =
+            verticalScrollbarWidth > 0 && event.clientX >= bounds.right - verticalScrollbarWidth;
+          const inHorizontalScrollbar =
+            horizontalScrollbarHeight > 0 && event.clientY >= bounds.bottom - horizontalScrollbarHeight;
+          if (inVerticalScrollbar || inHorizontalScrollbar) return;
+        }
+      }
+      startDrag(event);
+    },
+    [startDrag],
   );
 
   const startResize = useCallback(
@@ -505,6 +528,7 @@ export function FloatingPanel({ onOpenSettings }: FloatingPanelProps) {
     <div
       ref={panelRef}
       className={`cd2-floating-panel${dragging ? " cd2-is-dragging" : ""}${resizing ? " cd2-is-resizing" : ""}`}
+      onPointerDown={startPanelDrag}
       style={{
         left: activePosition.left,
         bottom: activePosition.bottom,
@@ -521,7 +545,6 @@ export function FloatingPanel({ onOpenSettings }: FloatingPanelProps) {
           <span
             className="cd2-panel-drag-handle"
             style={{ display: "flex", alignItems: "center", gap: 6, width: "100%" }}
-            onPointerDown={startDrag}
             title="拖动面板"
           >
             <img src={CD2_ICON_BASE64} width={18} height={18} alt="" draggable={false} />

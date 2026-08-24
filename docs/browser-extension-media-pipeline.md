@@ -1,6 +1,6 @@
 # 浏览器扩展媒体播放固定方案
 
-本文记录 1.6.42 起固定使用的 CloudDrive2 远程 MKV 播放方案。后续修改音频、字幕、播放器恢复或 Range 缓存时，必须以本文为兼容基线，并同时回归音频与字幕，不能只验证单项功能。
+本文记录 1.6.42 起固定使用的 CloudDrive2 远程 MKV 播放方案。后续修改音频、字幕、播放器恢复或 Range 缓存时，必须以本文为兼容基线，并同时回归音频与字幕，不能只验证单项功能。视频解码与画面渲染的详细算法见 [浏览器扩展视频解码与渲染固定方案](browser-extension-video-decoding.md)。
 
 ## 固定约束
 
@@ -9,7 +9,7 @@
 - 不完整下载大型 MKV，只通过 HTTP Range 按需读取。
 - Windows Chrome 不支持的 AC-3/E-AC-3 由扩展内置解码器处理。
 - MKV 内嵌 ASS/SSA/SubRip/WebVTT 由扩展内 libav.js 解封装。
-- 音频与字幕共享读取缓存，但音频启动优先；二者不能互相全局串行。
+- 视频画面、音频与字幕均通过 Range Host 读取；视频使用普通优先级，音频启动优先，音频与字幕不能互相全局串行。
 
 ## 最终数据流
 
@@ -20,6 +20,9 @@ CloudDrive2 视频直链
         │
         └── Range Host：1 MiB 分块、64 MiB LRU、进行中请求合并
                  │
+                 ├── video-renderer：Mediabunny 顺序 VideoSampleSink
+                 │               → WebCodecs 软件/硬件 → OffscreenCanvas/bitmaprenderer
+                 │
                  ├── audio-host：Mediabunny + @mediabunny/ac3
                  │               → PCM → Web Audio
                  │
@@ -27,7 +30,7 @@ CloudDrive2 视频直链
                                  → ASS 或 WebVTT → ArtPlayer/libass
 ```
 
-原生 `<video>` 继续直接使用 CloudDrive2 URL。Manifest V3 Service Worker 不能可靠地把扩展静态资源替换成动态媒体 Range 响应，不要重新引入 `media-cache-stream.bin` 一类占位播放地址。
+原生 `<video>` 继续直接使用 CloudDrive2 URL，负责音频、时间轴和原生回退。扩展播放视频时还可由播放器“解码”菜单启用 Mediabunny/WebCodecs 画面层：它通过 Range Host 的普通优先级读取 1 MiB 分块，使用独立 64 MiB 内存缓存和网络预读，并可请求软件或硬件解码；画面层按视频轨道原始像素尺寸创建 Canvas，不主动降低输出分辨率。首帧确认后才隐藏原生画面，初始化、跳转重建或解码失败时恢复原生画面。Manifest V3 Service Worker 不能可靠地把扩展静态资源替换成动态媒体 Range 响应，不要重新引入 `media-cache-stream.bin` 一类占位播放地址。
 
 ## Range Host 固定策略
 
@@ -37,7 +40,7 @@ CloudDrive2 视频直链
 - 最多同时执行四个网络分块请求。
 - 调度优先级固定为 `audio > subtitle > normal`。
 - 同一分片尚在队列中时，后到的高优先级请求必须提升已有任务的优先级；不能因为字幕先排队就让随后到达的音频继续等待。
-- 音频和字幕访问同一区域时必须复用已完成或正在进行的分块。
+- 视频、音频和字幕访问同一区域时必须复用已完成或正在进行的分块；视频使用 `normal` 优先级，不得阻塞音频。
 - 文件尾部不足 1 MiB 是合法 EOF；按 Content-Range 总长度截断，不能报“Range 数据提前结束”。
 
 ## 音频与字幕启动顺序
@@ -118,6 +121,6 @@ pnpm --filter clouddrive2-browser-extension run test:libav-mkv
 pnpm --filter clouddrive2-browser-extension run build
 ```
 
-实机至少验证：首次出声、默认字幕出现、暂停恢复、跳转、刷新恢复字幕选择、forced 空窗口、普通 English 完整字幕以及关闭播放器。
+实机至少验证：软件解码与硬件解码首帧、连续播放、暂停恢复、跳转后恢复画面、原生回退、首次出声、默认字幕出现、刷新恢复字幕选择、forced 空窗口、普通 English 完整字幕以及关闭播放器。
 
-Canvas2D 的 `willReadFrequently` 属于性能提示，不是音频或字幕加载失败。扩展重新构建后必须在扩展管理页重新加载，并关闭旧播放页面后重新打开，避免旧 Worker、iframe 和内容脚本继续运行。
+构建时会为 libass 的 Canvas2D 上下文设置 `willReadFrequently`，避免字幕初始化的 `getImageData` 触发重复读回警告。扩展重新构建后必须在扩展管理页重新加载，并关闭旧播放页面后重新打开，避免旧 Worker、iframe 和内容脚本继续运行。

@@ -6,12 +6,14 @@ import {
 	preloadExtensionStorage,
 	registerExtensionCommandBridge,
 } from "./compat/monkey";
+import { registerVideoRendererBridge } from "./compat/video-renderer";
 
 async function start(): Promise<void> {
 	await preloadExtensionStorage();
 	registerExtensionCommandBridge();
 	registerLibavSubtitleBridge();
 	registerAudioFallbackBridge();
+	registerVideoRendererBridge();
 	startArtplayer();
 	startOffline();
 	console.info("[cd2-extension] CloudDrive2 浏览器扩展已加载");

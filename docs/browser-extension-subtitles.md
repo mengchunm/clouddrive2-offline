@@ -118,7 +118,7 @@ pnpm run build:extension
 5. 验证当前时间字幕可快速显示、拖动进度后字幕可继续加载、接近当前短窗口边界时可以后台预读取下一段；选择当前时间没有对白的轨道不应报错。
 6. 控制台不应出现跨源 Worker 错误、`ASS 中没有 Dialogue 字幕内容`，也不应对受支持的 SRT 轨道启动整文件字幕提取。
 
-Canvas2D 关于 `willReadFrequently` 的提示属于浏览器性能建议，不是字幕加载失败原因。
+扩展构建会为 libass 的 Canvas2D 上下文设置 `willReadFrequently`，避免字幕初始化的 `getImageData` 触发重复读回提示。
 
 ## 不应回退的实现
 
