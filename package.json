@@ -12,5 +12,8 @@
     "typecheck": "pnpm -r --if-present run typecheck",
     "lint": "pnpm -r run lint",
     "format": "pnpm -r run format"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.8"
   }
 }
