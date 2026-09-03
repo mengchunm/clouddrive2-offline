@@ -1,0 +1,85 @@
+name: Build universal libav audio core
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "24"
+  EMSCRIPTEN_VERSION: "6.0.5"
+
+jobs:
+  build:
+    name: Build cd2-audio WASM
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v5
+
+      - name: Read audio core configuration
+        shell: bash
+        run: |
+          node <<'NODE' >> "$GITHUB_ENV"
+          const config = require('./packages/extension/libav-audio.config.json');
+          console.log(`LIBAV_TAG=${config.libavJsTag}`);
+          console.log(`LIBAV_VERSION=${config.libavJsTag.replace(/^v/, '')}`);
+          console.log(`LIBAV_VARIANT=${config.variant}`);
+          NODE
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Setup Emscripten
+        uses: mymindstorm/setup-emsdk@v16
+        with:
+          version: ${{ env.EMSCRIPTEN_VERSION }}
+          actions-cache-folder: cache-emsdk
+
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config
+
+      - name: Checkout libav.js
+        run: git clone --depth 1 --branch "$LIBAV_TAG" https://github.com/Yahweasel/libav.js.git .libav-build
+
+      - name: Generate custom libav.js variant
+        shell: bash
+        run: |
+          COMPONENTS=$(node -p "JSON.stringify(require('./packages/extension/libav-audio.config.json').components)")
+          cd .libav-build/configs
+          node mkconfig.js "$LIBAV_VARIANT" "$COMPONENTS"
+
+      - name: Install libav.js build dependencies
+        working-directory: .libav-build
+        run: npm ci
+
+      - name: Build plain WebAssembly runtime
+        working-directory: .libav-build
+        run: make "dist/libav-${LIBAV_VERSION}-${LIBAV_VARIANT}.wasm.mjs" dist/libav.types.d.ts -j"$(nproc)"
+
+      - name: Assemble distributable artifact and corresponding sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="libav-audio-${LIBAV_VERSION}"
+          mkdir -p "$OUT/dist" "$OUT/sources"
+          cp ".libav-build/dist/libav-${LIBAV_VERSION}-${LIBAV_VARIANT}.wasm.mjs" "$OUT/dist/"
+          cp ".libav-build/dist/libav-${LIBAV_VERSION}-${LIBAV_VARIANT}.wasm.wasm" "$OUT/dist/"
+          cp .libav-build/dist/libav.types.d.ts "$OUT/dist/"
+          cp .libav-build/LICENSE.md "$OUT/"
+          cp packages/extension/libav-audio.config.json "$OUT/"
+          cp ".libav-build/build/ffmpeg-9.0.tar.xz" "$OUT/sources/"
+          git -C .libav-build archive --format=tar.gz --output="../$OUT/sources/libav.js-${LIBAV_VERSION}.tar.gz" "$LIBAV_TAG"
+          (cd "$OUT" && sha256sum dist/* sources/* > SHA256SUMS)
+
+      - name: Upload audio core
+        uses: actions/upload-artifact@v4
+        with:
+          name: libav-audio-${{ env.LIBAV_VERSION }}
+          path: libav-audio-${{ env.LIBAV_VERSION }}
+          if-no-files-found: error
+          compression-level: 9
